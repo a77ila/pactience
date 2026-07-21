@@ -1,0 +1,123 @@
+name: Release
+
+# Runs on version tags (v*). Bump `version` in src/Cargo.toml and
+# packaging/aur/PKGBUILD first; the workflow refuses mismatched tags.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  CRATE_DIR: src
+  AUR_PACKAGE: pactience
+
+jobs:
+  release:
+    name: Build binary and create GitHub Release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src
+
+      - name: Verify tag matches crate version
+        run: |
+          tag_version="${GITHUB_REF_NAME#v}"
+          crate_version="$(grep -m1 '^version' src/Cargo.toml | cut -d'"' -f2)"
+          if [ "$tag_version" != "$crate_version" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match Cargo.toml version $crate_version"
+            exit 1
+          fi
+
+      - name: Build release binary
+        working-directory: src
+        run: cargo build --release --locked
+
+      - name: Package artifacts
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          asset="pactience-${version}-x86_64-unknown-linux-gnu"
+          strip src/target/release/pactience
+          tar -C src/target/release -czf "${asset}.tar.gz" pactience
+          sha256sum "${asset}.tar.gz" > "${asset}.tar.gz.sha256"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          asset="pactience-${version}-x86_64-unknown-linux-gnu"
+          gh release create "$GITHUB_REF_NAME" \
+            --title "pactience $version" \
+            --generate-notes \
+            "${asset}.tar.gz" "${asset}.tar.gz.sha256"
+
+  aur:
+    name: Publish to the AUR
+    needs: release
+    runs-on: ubuntu-latest
+    # makepkg only runs on Arch; nodejs is needed by actions/checkout.
+    container: archlinux:base-devel
+    steps:
+      - name: Install tooling
+        run: pacman -Sy --noconfirm --needed nodejs git openssh
+
+      - uses: actions/checkout@v7
+
+      - name: Trust workspace
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Compute source tarball checksum
+        run: |
+          url="https://github.com/a77ila/pactience/archive/refs/tags/${GITHUB_REF_NAME}.tar.gz"
+          curl -fL --retry 5 --retry-delay 10 --retry-all-errors -o source.tar.gz "$url"
+          echo "SOURCE_SHA256=$(sha256sum source.tar.gz | cut -d' ' -f1)" >> "$GITHUB_ENV"
+
+      - name: Set up AUR SSH key
+        env:
+          AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+        run: |
+          # ssh resolves ~/.ssh via the passwd database, not $HOME (which
+          # Actions points at /github/home inside container jobs), so use
+          # the real home directory of the current user.
+          ssh_dir="$(getent passwd "$(id -u)" | cut -d: -f6)/.ssh"
+          install -dm700 "$ssh_dir"
+          printf '%s\n' "$AUR_SSH_PRIVATE_KEY" > "$ssh_dir/id_ed25519"
+          chmod 600 "$ssh_dir/id_ed25519"
+          ssh-keyscan aur.archlinux.org >> "$ssh_dir/known_hosts"
+          grep -q aur.archlinux.org "$ssh_dir/known_hosts"
+
+      - name: Update and push AUR package
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          git clone "ssh://aur@aur.archlinux.org/${AUR_PACKAGE}.git" aur
+          cd aur
+          sed -e "s/^pkgver=.*/pkgver=${version}/" \
+              -e "s/^sha256sums=.*/sha256sums=('${SOURCE_SHA256}')/" \
+              "$GITHUB_WORKSPACE/packaging/aur/PKGBUILD" > PKGBUILD
+          # makepkg refuses to run as root; regenerate .SRCINFO as a user.
+          # makepkg requires writable BUILDDIR/PKGDEST/... even for
+          # --printsrcinfo, so point them at /tmp. Do NOT chown the repo to
+          # builder instead: that trips git's ownership check ("fatal: not
+          # in a git directory") for the git commands below.
+          useradd -m builder
+          runuser -u builder -- env BUILDDIR=/tmp PKGDEST=/tmp SRCDEST=/tmp \
+              SRCPKGDEST=/tmp LOGDEST=/tmp makepkg --printsrcinfo > .SRCINFO
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add PKGBUILD .SRCINFO
+          if git diff --cached --quiet; then
+            echo "AUR package already up to date"
+          else
+            git commit -m "Update to ${version}"
+            git push origin master
+          fi

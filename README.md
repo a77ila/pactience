@@ -2,6 +2,9 @@
 
 *Teach your pacman patience.*
 
+[![CI](https://github.com/a77ila/pactience/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/a77ila/pactience/actions/workflows/ci.yml)
+[![Release](https://github.com/a77ila/pactience/actions/workflows/release.yml/badge.svg)](https://github.com/a77ila/pactience/actions/workflows/release.yml)
+
 > This project is being built using [Kimi 3](https://www.moonshot.cn/) (Kimi Code CLI).
 
 A Rust CLI for Arch Linux that enforces a **minimum package age** policy before

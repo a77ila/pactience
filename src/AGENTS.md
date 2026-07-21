@@ -58,7 +58,9 @@ All cargo commands run from the crate directory (`src/`).
 
 ```
 <repo root> (= /workspace in the dev container)
-├── .github/workflows/ci.yml  # CI (runs cargo with working-directory: src)
+├── .github/workflows/ci.yml      # CI (runs cargo with working-directory: src)
+├── .github/workflows/release.yml # Tag (v*) -> GitHub Release binary + AUR publish
+├── packaging/aur/PKGBUILD        # Template the release workflow pushes to the AUR
 ├── .docker/                  # Dev container (compose mounts repo root at /workspace;
 │                             #   target-cache -> /workspace/src/target, dist -> /workspace/src/dist)
 ├── console.example           # Captured real-world run (linked from the root README)
@@ -150,7 +152,8 @@ The project is prepared for open-source publication:
 - **Licensing:** dual `MIT OR Apache-2.0` (`LICENSE-MIT`, `LICENSE-APACHE` at repo root and in the crate, kept byte-identical), declared in `Cargo.toml`; README carries the standard dual-license contribution clause.
 - **Crate metadata:** `Cargo.toml` has description, rust-version (1.88, for edition-2024 let-chains), keywords/categories, and `exclude = ["/dist"]` keeping build output out of the crate. `cargo publish --dry-run` passes (~32 files). Since a git repo now exists, packaging requires committed files (or `--allow-dirty`).
 - **Repository URL:** `Cargo.toml` `repository` is still a `YOUR-USERNAME` placeholder — replace it before publishing.
-- **CI:** `.github/workflows/ci.yml` at the *repository root* (the only location GitHub reads) runs fmt, clippy (`-D warnings`), the full test suite, and a locked release build (binary uploaded as an artifact) on stable Rust, plus an MSRV `cargo check` on 1.88. All cargo steps use `working-directory: src` because the crate is not at the root. Tests run on `ubuntu-latest` by design (no pacman/paru needed).
+- **CI:** `.github/workflows/ci.yml` at the *repository root* (the only location GitHub reads) runs fmt, clippy (`-D warnings`), the full test suite, and a locked release build (binary uploaded as an artifact) on stable Rust, plus an MSRV `cargo check` on 1.88, on every push to any branch and on pull requests. All cargo steps use `working-directory: src` because the crate is not at the root. Tests run on `ubuntu-latest` by design (no pacman/paru needed).
+- **Releases:** `.github/workflows/release.yml` runs on `v*` tags. It verifies the tag matches the `Cargo.toml` version, builds and strips the x86_64 Linux binary, attaches a tarball + sha256 to a GitHub Release (auto-generated notes), then publishes to the AUR: it renders `packaging/aur/PKGBUILD` with the tag version and the sha256 of the GitHub source tarball, regenerates `.SRCINFO` with `makepkg --printsrcinfo` in an `archlinux:base-devel` container, and pushes to `ssh://aur@aur.archlinux.org/pactience.git` using the `AUR_SSH_PRIVATE_KEY` repo secret. Release procedure: bump `version` in `src/Cargo.toml` and `pkgver` in `packaging/aur/PKGBUILD`, commit, then `git tag vX.Y.Z && git push --tags`.
 - **READMEs:** the repo-root `README.md` is the GitHub face (may reference repo-level files like `console.example`); `src/README.md` is the crates.io face and must stay self-contained. Otherwise keep them in sync.
 
-Not yet published to crates.io; no AUR package exists yet.
+Not yet published to crates.io; the AUR package still needs to be registered (initial push to the AUR git repo, see "Releases" above) before the release workflow can update it.
