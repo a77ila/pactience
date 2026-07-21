@@ -1,0 +1,5 @@
+.docker_data/
+.idea/
+/dist
+/src/target
+/target

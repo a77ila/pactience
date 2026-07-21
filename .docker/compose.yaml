@@ -1,0 +1,17 @@
+services:
+  kimi:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: kimi-rust-cli
+    working_dir: /workspace
+    volumes:
+      - ..:/workspace
+      - ../.docker:/workspace/.docker
+      - ../.docker_data/kimi-home:/root
+      - ../.docker_data/cargo-registry:/usr/local/cargo/registry
+      - ../.docker_data/cargo-git:/usr/local/cargo/git
+      - ../.docker_data/target-cache:/workspace/src/target
+    stdin_open: true
+    tty: true
+    command: kimi
