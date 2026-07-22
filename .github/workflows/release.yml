@@ -1,7 +1,7 @@
 name: Release
 
 # Runs on version tags (v*). Bump `version` in src/Cargo.toml and
-# packaging/aur/PKGBUILD first; the workflow refuses mismatched tags.
+# packaging/aur*/PKGBUILD first; the workflow refuses mismatched tags.
 on:
   push:
     tags: ["v*"]

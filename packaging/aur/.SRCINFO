@@ -1,7 +1,7 @@
 pkgbase = pactience
 	pkgdesc = Enforce a minimum package age before upgrading Arch Linux packages (pacman/AUR)
-	pkgver = 0.1.0
-	pkgrel = 2
+	pkgver = 0.1.2
+	pkgrel = 1
 	url = https://github.com/a77ila/pactience
 	arch = x86_64
 	arch = aarch64
@@ -14,7 +14,7 @@ pkgbase = pactience
 	optdepends = paru: AUR package support
 	optdepends = yay: AUR package support
 	options = !lto
-	source = pactience-0.1.0.tar.gz::https://github.com/a77ila/pactience/archive/refs/tags/v0.1.0.tar.gz
+	source = pactience-0.1.2.tar.gz::https://github.com/a77ila/pactience/archive/refs/tags/v0.1.2.tar.gz
 	sha256sums = SKIP
 
 pkgname = pactience

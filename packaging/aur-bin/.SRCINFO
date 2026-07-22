@@ -1,6 +1,6 @@
 pkgbase = pactience-bin
 	pkgdesc = Enforce a minimum package age before upgrading Arch Linux packages (pacman/AUR) (prebuilt)
-	pkgver = 0.1.0
+	pkgver = 0.1.2
 	pkgrel = 1
 	url = https://github.com/a77ila/pactience
 	arch = x86_64
@@ -14,9 +14,9 @@ pkgbase = pactience-bin
 	optdepends = yay: AUR package support
 	provides = pactience
 	conflicts = pactience
-	source_x86_64 = pactience-0.1.0-x86_64-unknown-linux-gnu.tar.gz::https://github.com/a77ila/pactience/releases/download/v0.1.0/pactience-0.1.0-x86_64-unknown-linux-gnu.tar.gz
+	source_x86_64 = pactience-0.1.2-x86_64-unknown-linux-gnu.tar.gz::https://github.com/a77ila/pactience/releases/download/v0.1.2/pactience-0.1.2-x86_64-unknown-linux-gnu.tar.gz
 	sha256sums_x86_64 = SKIP
-	source_aarch64 = pactience-0.1.0-aarch64-unknown-linux-gnu.tar.gz::https://github.com/a77ila/pactience/releases/download/v0.1.0/pactience-0.1.0-aarch64-unknown-linux-gnu.tar.gz
+	source_aarch64 = pactience-0.1.2-aarch64-unknown-linux-gnu.tar.gz::https://github.com/a77ila/pactience/releases/download/v0.1.2/pactience-0.1.2-aarch64-unknown-linux-gnu.tar.gz
 	sha256sums_aarch64 = SKIP
 
 pkgname = pactience-bin

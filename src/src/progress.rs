@@ -26,9 +26,15 @@ impl Progress {
     /// Start a bar for `total` steps. Inactive (silent) unless stderr is a
     /// terminal and the verbosity would not already narrate each step.
     pub fn start(total: usize, log: &Logger) -> Self {
+        Self::start_on(total, log, std::io::stderr().is_terminal())
+    }
+
+    /// `start` with the terminal detection injectable, so tests do not
+    /// depend on whether the test process itself runs on a TTY.
+    fn start_on(total: usize, log: &Logger, stderr_is_terminal: bool) -> Self {
         let active = total > 0
             && enabled_by_verbosity(log)
-            && std::io::stderr().is_terminal()
+            && stderr_is_terminal
             && std::env::var_os("TERM").is_none_or(|term| term != "dumb");
         Progress {
             total,
@@ -119,9 +125,10 @@ mod tests {
 
     #[test]
     fn inactive_without_terminal() {
-        // cargo test captures stderr, so the bar must stay inactive here.
+        // libtest captures output in-process without redirecting fd 2, so
+        // the real stderr may still be a TTY; pass the flag explicitly.
         let log = logger(&[]);
-        let mut progress = Progress::start(3, &log);
+        let mut progress = Progress::start_on(3, &log, false);
         assert!(!progress.active);
         // Inactive bars are silent no-ops.
         progress.advance(&log, "pkg");

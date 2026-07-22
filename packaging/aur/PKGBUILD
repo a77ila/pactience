@@ -1,7 +1,7 @@
 # Maintainer: a77ila
 pkgname=pactience
-pkgver=0.1.0
-pkgrel=2
+pkgver=0.1.2
+pkgrel=1
 pkgdesc="Enforce a minimum package age before upgrading Arch Linux packages (pacman/AUR)"
 arch=('x86_64' 'aarch64')
 url="https://github.com/a77ila/pactience"
