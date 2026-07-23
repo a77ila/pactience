@@ -3,8 +3,10 @@
 //! For every upgrade candidate we look at the dependency declarations of its
 //! *candidate* version (sync DB for repo packages, AUR RPC metadata for AUR
 //! packages) and classify each one: already satisfied by the installed
-//! system, satisfiable only by another package in the upgrade set, or
-//! unsatisfiable. The policy engine turns these into promote/block verdicts.
+//! system, satisfiable only by another package in the upgrade set, coupled to
+//! a co-pending dependency (satisfied by the installed version, but the
+//! dependency is itself pending — verdicts must agree), or unsatisfiable.
+//! The policy engine turns these into promote/block verdicts.
 
 use std::collections::HashMap;
 
@@ -19,6 +21,12 @@ pub enum RequirementStatus {
     /// Only another package in the upgrade set satisfies it: the candidate
     /// must be upgraded together with (or instead of) the installed version.
     RequiresCandidate { name: String },
+    /// The installed version satisfies the dep, but the dep itself is also a
+    /// pending upgrade. Upgrading the dependency while holding this dependent
+    /// back can break the *installed* dependent (unversioned soname coupling,
+    /// the classic partial-upgrade hazard), so their verdicts must agree:
+    /// promote the dependent or block the dependency.
+    CoupledWithCandidate { name: String },
     /// Nothing installed or in the upgrade set satisfies it.
     Unsatisfied,
 }
@@ -87,8 +95,12 @@ fn classify(
                 name: provider.name.clone(),
             };
         }
-        return RequirementStatus::SatisfiedByInstalled {
-            version: provider.installed_version.clone(),
+        // The installed version satisfies the constraint, but the dependency
+        // is itself pending: upgrading it underneath a held-back dependent is
+        // exactly the partial-upgrade hazard (Arch rarely versions deps, so a
+        // soname bump shows up as a plain name edge).
+        return RequirementStatus::CoupledWithCandidate {
+            name: provider.name.clone(),
         };
     }
 
@@ -279,6 +291,42 @@ mod tests {
         assert_eq!(
             reqs[0].status,
             RequirementStatus::RequiresCandidate {
+                name: "bar".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn pending_dependency_satisfied_by_installed_is_coupled() {
+        // Unversioned edge between two co-pending packages: verdicts must
+        // agree even though the installed version satisfies the dep.
+        let candidates = vec![
+            candidate("foo", "1.0-1", "2.0-1"),
+            candidate("bar", "1.0-1", "2.0-1"),
+        ];
+        let deps = HashMap::from([("foo".to_string(), vec![dep("bar")])]);
+        let localdb = localdb_with(&[("foo", "1.0-1"), ("bar", "1.0-1")]);
+        let reqs = analyze(&candidates, &deps, &SyncDb::default(), &localdb);
+        assert_eq!(
+            reqs[0].status,
+            RequirementStatus::CoupledWithCandidate {
+                name: "bar".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn versioned_dep_satisfied_by_installed_is_still_coupled() {
+        let candidates = vec![
+            candidate("foo", "1.0-1", "2.0-1"),
+            candidate("bar", "1.5-1", "2.0-1"),
+        ];
+        let deps = HashMap::from([("foo".to_string(), vec![dep("bar>=1.0")])]);
+        let localdb = localdb_with(&[("foo", "1.0-1"), ("bar", "1.5-1")]);
+        let reqs = analyze(&candidates, &deps, &SyncDb::default(), &localdb);
+        assert_eq!(
+            reqs[0].status,
+            RequirementStatus::CoupledWithCandidate {
                 name: "bar".to_string()
             }
         );

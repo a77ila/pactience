@@ -34,6 +34,13 @@ pass `--apply`.
    - `dependency-respecting` (default): the dependency is *promoted* into the
      upgrade set (consistency beats age), unless it is `always_block`-listed;
    - `strict-closure`: the dependent is blocked instead, transitively.
+
+   Co-pending packages linked by a dependency edge also share a verdict: an
+   allowed dependency is never upgraded while one of its dependents is held
+   back — the dependent is promoted, or the dependency is blocked. Arch
+   rarely versions its dependencies, so without this a soname bump could
+   slip through underneath a held-back package (the classic partial-upgrade
+   breakage).
 5. **Apply** — with `--apply`, the allowed set is installed via
    `sudo pacman -S` / `<aur-helper> -S` (no shell, validated package names).
 
