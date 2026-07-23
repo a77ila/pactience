@@ -124,6 +124,12 @@ AUR git clones) and exits.
   `always_block`, or an unsatisfiable dependency. The tool never performs
   partial upgrades: anything whose dependency requirements cannot be satisfied
   by the installed system plus the allowed set is blocked.
+- AUR commit dates are maintainer-controlled and can be forged. Since the AUR
+  is append-only, `pactience` rejects histories with non-monotonic commit
+  timestamps (a commit predating its own parent proves tampering) and fails
+  safe to unknown — blocked by default. Backdating within the age of the
+  previous commit is undetectable by design; a malicious maintainer controls
+  the PKGBUILD you build anyway, which is outside the threat model.
 
 ## Development
 

@@ -14,6 +14,15 @@
 //! fetched afterwards, so repeat runs are cheap. A failed fetch is tolerated
 //! (the existing clone is used); a failed initial clone is an error and the
 //! resolver falls back to weaker AUR sources with a warning.
+//!
+//! Commit dates are maintainer-controlled and can be forged (`git commit
+//! --date=...`). The AUR rejects non-fast-forward pushes, so history is
+//! append-only and committer dates along it must be non-increasing walking
+//! newest-to-oldest (modulo clock skew): a commit predating its own parent
+//! proves a forged timestamp, and the history is rejected as untrustworthy.
+//! This bounds any undetected backdating to the age of the previous commit;
+//! a date forged within that window is undetectable by design and accepted
+//! (a malicious maintainer controls the PKGBUILD anyway).
 
 use std::path::{Path, PathBuf};
 
@@ -24,6 +33,10 @@ use crate::model::{Publication, PublicationBasis, UpgradeCandidate};
 use super::PublicationSource;
 
 pub const DEFAULT_BASE_URL: &str = "https://aur.archlinux.org";
+
+/// Tolerance for clock skew when checking that commit dates are monotonic
+/// along the (append-only) AUR history.
+const MAX_CLOCK_SKEW_SECS: i64 = 86_400;
 
 pub struct AurGitPublicationSource<'a> {
     runner: &'a dyn CommandRunner,
@@ -161,8 +174,25 @@ impl PublicationSource for AurGitPublicationSource<'_> {
 
         // Walk .SRCINFO history newest-to-oldest; the candidate's publication
         // is the oldest commit in the contiguous top-run matching it.
+        //
+        // Forgery check: committer dates must be non-increasing along the
+        // walk (the AUR is append-only; modulo clock skew). A commit that
+        // predates its own parent proves a forged timestamp — reject the
+        // history so the resolver fails safe to weaker/unknown sources.
+        let mut max_ts_seen: Option<i64> = None;
         let mut introduced: Option<i64> = None;
         for (sha, ts) in self.srcinfo_history(&repo)? {
+            if let Some(max) = max_ts_seen
+                && ts > max + MAX_CLOCK_SKEW_SECS
+            {
+                return Err(Error::parse(
+                    "AUR git history",
+                    format!(
+                        "{name}: non-monotonic commit timestamps (forged --date or skewed clock); rejecting history"
+                    ),
+                ));
+            }
+            max_ts_seen = Some(max_ts_seen.map_or(ts, |m| m.max(ts)));
             match self.version_at(&repo, &sha)? {
                 Some(version) if version == candidate.candidate_version => {
                     introduced = Some(ts);
@@ -432,6 +462,39 @@ mod tests {
             AurGitPublicationSource::with_base_url(&runner, dir.clone(), "https://aur.test");
         let p = source.publication(&candidate("foo", "1.0-1")).unwrap();
         assert_eq!(p.published_at, None);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn non_monotonic_history_is_rejected_as_forged() {
+        let dir = temp_dir("forged");
+        // The candidate's commit claims t=100 but its own parent is at
+        // t=100_000_000 (newer): impossible in an append-only repo.
+        let runner = history_runner(&[
+            ("aaa", 100, "2.1.0", "2"),
+            ("bbb", 100_000_000, "2.1.0", "1"),
+        ]);
+        let source =
+            AurGitPublicationSource::with_base_url(&runner, dir.clone(), "https://aur.test");
+        let err = source
+            .publication(&candidate("paru", "2.1.0-2"))
+            .unwrap_err();
+        assert!(err.to_string().contains("non-monotonic"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn minor_skew_within_tolerance_is_accepted() {
+        let dir = temp_dir("skew");
+        // Parent is 1h newer than the child: within clock-skew tolerance.
+        let runner = history_runner(&[
+            ("aaa", 100_000_000, "2.1.0", "2"),
+            ("bbb", 100_000_000 + 3_600, "2.1.0", "1"),
+        ]);
+        let source =
+            AurGitPublicationSource::with_base_url(&runner, dir.clone(), "https://aur.test");
+        let p = source.publication(&candidate("paru", "2.1.0-2")).unwrap();
+        assert_eq!(p.published_at, Some(100_000_000));
         std::fs::remove_dir_all(&dir).ok();
     }
 
