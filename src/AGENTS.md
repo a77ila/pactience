@@ -64,6 +64,7 @@ All cargo commands run from the crate directory (`src/`).
 ├── .docker/                  # Dev container (compose mounts repo root at /workspace;
 │                             #   target-cache -> /workspace/src/target, dist -> /workspace/src/dist)
 ├── console.example           # Captured real-world run (linked from the root README)
+├── CHANGELOG.md              # Keep-a-Changelog release notes (update on every release)
 ├── README.md                 # Repo-facing readme (may reference repo-level files)
 ├── LICENSE-MIT, LICENSE-APACHE
 └── src/                      # THE CRATE (pactience)
