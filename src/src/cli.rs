@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use clap::Parser;
 
 use crate::config::{AurHelper, DependencyPolicy};
+use crate::model::PackageSource;
 
 /// Enforce a minimum package age before upgrading Arch Linux packages.
 #[derive(Debug, Parser)]
@@ -28,6 +29,12 @@ pub struct Cli {
     /// Minimum package age in days required before a package may be upgraded.
     #[arg(short = 'm', long, value_name = "DAYS")]
     pub min_age_days: Option<u32>,
+
+    /// Persist DAYS as min_age_days in the configuration file, then exit.
+    /// The file is created from the template when missing; an existing
+    /// active min_age_days line is replaced in place.
+    #[arg(long, value_name = "DAYS", conflicts_with = "min_age_days")]
+    pub set_min_age: Option<u32>,
 
     /// How to handle upgrades that require younger dependencies.
     #[arg(long, value_enum)]
@@ -54,6 +61,13 @@ pub struct Cli {
     /// AUR handling entirely.
     #[arg(long, value_enum, value_name = "HELPER")]
     pub aur_helper: Option<AurHelper>,
+
+    /// Which package sources to manage for this run, as a comma-separated
+    /// list (`repo,aur`, `repo`, or `aur`). Overrides the sources setting
+    /// from the configuration file and suppresses the first-run/upgrade
+    /// prompt for it.
+    #[arg(long, value_enum, value_name = "SOURCES", value_delimiter = ',')]
+    pub sources: Option<Vec<PackageSource>>,
 
     /// Increase diagnostic verbosity on stderr. Repeat for more detail:
     /// `-v` shows one line per action, `-vv` shows internal detail.

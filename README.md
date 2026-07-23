@@ -34,6 +34,13 @@ pass `--apply`.
    - `dependency-respecting` (default): the dependency is *promoted* into the
      upgrade set (consistency beats age), unless it is `always_block`-listed;
    - `strict-closure`: the dependent is blocked instead, transitively.
+
+   Co-pending packages linked by a dependency edge also share a verdict: an
+   allowed dependency is never upgraded while one of its dependents is held
+   back — the dependent is promoted, or the dependency is blocked. Arch
+   rarely versions its dependencies, so without this a soname bump could
+   slip through underneath a held-back package (the classic partial-upgrade
+   breakage).
 5. **Apply** — with `--apply`, the allowed set is installed via
    `sudo pacman -S` / `<aur-helper> -S` (no shell, validated package names).
 
@@ -60,6 +67,7 @@ make dist        # produces dist/pactience
 ```bash
 pactience                 # dry-run report (table)
 pactience -m 7            # require a 7-day minimum age
+pactience --set-min-age 7 # persist min_age_days = 7 in the config and exit
 pactience --apply         # install the allowed set
 pactience --json          # machine-readable report
 pactience -v              # one info line per action (-vv for debug)
@@ -79,14 +87,16 @@ hint: 1 package(s) blocked; whitelist trusted packages via always_allow in ~/.co
 ```
 
 Notable flags: `--dependency-policy`, `--aur-heuristic`, `--no-aur-git`,
-`--aur-helper`, `--allow-unknown`, `--config`, `-q/--quiet`, `--summary-only`,
-`--clear-cache`. See `--help`.
+`--aur-helper`, `--sources`, `--allow-unknown`, `--set-min-age`, `--config`,
+`-q/--quiet`, `--summary-only`, `--clear-cache`. See `--help`.
 
 ## Configuration
 
-On first run you are asked which AUR helper to use (`paru`, `yay`, or `none`;
-non-interactive runs auto-detect from PATH, falling back to `paru`) and a
-fully commented template plus your choice is written to
+On first run you are asked which package sources to manage (`both`, `repo`
+only, or `aur` only) and which AUR helper to use (`paru`, `yay`, or `none`;
+non-interactive runs default to `both` and auto-detect the helper from PATH,
+falling back to `paru`) and a
+fully commented template plus your choices is written to
 `~/.config/pactience/config.toml`. All options (defaults shown):
 
 ```toml
@@ -99,6 +109,7 @@ fully commented template plus your choice is written to
 # aur_heuristic = false               # gate AUR by RPC LastModified
 # aur_git = true                      # accurate AUR dates from git history
 # aur_helper = "paru"                 # "paru", "yay", or "none"
+# sources = ["repo", "aur"]       # or ["repo"] only, or ["aur"] only
 ```
 
 CLI flags override the file. Publication results are cached in
@@ -117,6 +128,12 @@ AUR git clones) and exits.
   `always_block`, or an unsatisfiable dependency. The tool never performs
   partial upgrades: anything whose dependency requirements cannot be satisfied
   by the installed system plus the allowed set is blocked.
+- AUR commit dates are maintainer-controlled and can be forged. Since the AUR
+  is append-only, `pactience` rejects histories with non-monotonic commit
+  timestamps (a commit predating its own parent proves tampering) and fails
+  safe to unknown — blocked by default. Backdating within the age of the
+  previous commit is undetectable by design; a malicious maintainer controls
+  the PKGBUILD you build anyway, which is outside the threat model.
 
 ## Development
 

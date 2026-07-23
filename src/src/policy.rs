@@ -10,6 +10,12 @@
 //! - `strict-closure`: no promotions; any candidate whose requirements are
 //!   not satisfied by installed packages or age-allowed candidates is
 //!   blocked, transitively.
+//!
+//! Co-pending packages linked by a dependency edge additionally share a
+//! verdict: an allowed dependency is never upgraded underneath a held-back
+//! dependent (Arch rarely versions deps, so a soname bump is invisible in
+//! the metadata). The dependent is promoted, or — when it cannot be
+//! promoted, or under `strict-closure` — the dependency is blocked.
 
 use std::collections::HashMap;
 
@@ -134,11 +140,16 @@ fn index_of(decisions: &[Decision], name: &str) -> Option<usize> {
 }
 
 /// `dependency-respecting`: promote required younger dependencies; block
-/// dependents whose requirements cannot be met at all.
+/// dependents whose requirements cannot be met at all. Co-pending packages
+/// linked by a dependency edge share a verdict: a held-back dependent is
+/// promoted alongside its allowed dependency, and if it cannot be promoted
+/// the dependency is blocked instead.
 fn apply_dependency_respecting(decisions: &mut [Decision], requirements: &[Requirement]) {
-    // `always_block` packages must never be promoted; track which blocks are
-    // age-based (promotable) vs. configuration-based (not).
-    let hard_blocked: Vec<bool> = decisions
+    // `always_block` packages must never be promoted; track which packages
+    // may not be promoted. Promotability is lost whenever a candidate is
+    // blocked by a dependency rule (its block is then structural, not
+    // age-based), which keeps the fixpoint monotone.
+    let mut no_promote: Vec<bool> = decisions
         .iter()
         .map(|d| d.reasons.iter().any(|r| r.contains("always_block")))
         .collect();
@@ -151,9 +162,37 @@ fn apply_dependency_respecting(decisions: &mut [Decision], requirements: &[Requi
             };
             match &req.status {
                 RequirementStatus::SatisfiedByInstalled { .. } => {}
+                RequirementStatus::CoupledWithCandidate { name } => {
+                    let Some(b) = index_of(decisions, name) else {
+                        continue;
+                    };
+                    if !is_upgraded(decisions[b].verdict) || decisions[a].verdict != Verdict::Block
+                    {
+                        continue;
+                    }
+                    if no_promote[a] {
+                        // The held-back dependent can never be upgraded, so
+                        // the dependency must not move underneath its
+                        // installed version.
+                        decisions[b].verdict = Verdict::Block;
+                        no_promote[b] = true;
+                        decisions[b].reasons.push(format!(
+                            "blocked: held-back dependent {} cannot be promoted, and upgrading {name} alone could break its installed version",
+                            req.dependent
+                        ));
+                    } else {
+                        decisions[a].verdict = Verdict::Promote;
+                        decisions[a].reasons.push(format!(
+                            "promoted despite age: allowed dependency {name} upgrades underneath the held-back installed version ({})",
+                            format_dep(&req.dep)
+                        ));
+                    }
+                    changed = true;
+                }
                 RequirementStatus::Unsatisfied => {
                     if is_upgraded(decisions[a].verdict) {
                         decisions[a].verdict = Verdict::Block;
+                        no_promote[a] = true;
                         decisions[a].reasons.push(format!(
                             "blocked: candidate version requires {}, which no installed package or upgrade candidate provides",
                             format_dep(&req.dep)
@@ -169,10 +208,11 @@ fn apply_dependency_respecting(decisions: &mut [Decision], requirements: &[Requi
                         continue;
                     };
                     if decisions[b].verdict == Verdict::Block {
-                        if hard_blocked[b] {
+                        if no_promote[b] {
                             decisions[a].verdict = Verdict::Block;
+                            no_promote[a] = true;
                             decisions[a].reasons.push(format!(
-                                "blocked: requires {}, but {name} is blocked by always_block",
+                                "blocked: requires {}, but {name} cannot be promoted",
                                 format_dep(&req.dep)
                             ));
                         } else {
@@ -196,6 +236,7 @@ fn apply_dependency_respecting(decisions: &mut [Decision], requirements: &[Requi
 
 /// `strict-closure`: never promote; block candidates whose requirements are
 /// not met by installed packages or age-allowed candidates, transitively.
+/// A dependency is also blocked when a coupled dependent is held back.
 fn apply_strict_closure(decisions: &mut [Decision], requirements: &[Requirement]) {
     loop {
         let mut changed = false;
@@ -203,11 +244,30 @@ fn apply_strict_closure(decisions: &mut [Decision], requirements: &[Requirement]
             let Some(a) = index_of(decisions, &req.dependent) else {
                 continue;
             };
+            // Coupling protects the *installed* dependent: it fires exactly
+            // when the dependent is held back, so it must be handled before
+            // the upgraded-dependent short-circuit below.
+            if let RequirementStatus::CoupledWithCandidate { name } = &req.status {
+                let Some(b) = index_of(decisions, name) else {
+                    continue;
+                };
+                if is_upgraded(decisions[b].verdict) && decisions[a].verdict == Verdict::Block {
+                    decisions[b].verdict = Verdict::Block;
+                    decisions[b].reasons.push(format!(
+                        "blocked: held-back dependent {} is not upgraded, and upgrading {name} alone could break its installed version ({})",
+                        req.dependent,
+                        format_dep(&req.dep)
+                    ));
+                    changed = true;
+                }
+                continue;
+            }
             if !is_upgraded(decisions[a].verdict) {
                 continue;
             }
             let block_reason = match &req.status {
-                RequirementStatus::SatisfiedByInstalled { .. } => None,
+                RequirementStatus::SatisfiedByInstalled { .. }
+                | RequirementStatus::CoupledWithCandidate { .. } => None,
                 RequirementStatus::Unsatisfied => Some(format!(
                     "blocked: candidate version requires {}, which no installed package or allowed candidate provides",
                     format_dep(&req.dep)
@@ -433,7 +493,7 @@ mod tests {
                 .unwrap()
                 .reasons
                 .iter()
-                .any(|r| r.contains("always_block"))
+                .any(|r| r.contains("cannot be promoted"))
         );
     }
 
@@ -509,6 +569,168 @@ mod tests {
                 ("lib", published_days_ago(10)),
             ]),
             &reqs,
+            &cfg,
+            NOW,
+        );
+        assert_eq!(verdict_of(&d, "app"), Verdict::Allow);
+        assert_eq!(verdict_of(&d, "lib"), Verdict::Allow);
+    }
+
+    fn coupled(dependent: &str, dep: &str) -> Requirement {
+        Requirement {
+            dependent: dependent.to_string(),
+            dep: DepSpec::parse(dep).unwrap(),
+            status: RequirementStatus::CoupledWithCandidate {
+                name: dep.to_string(),
+            },
+        }
+    }
+
+    #[test]
+    fn coupled_dependent_is_promoted_with_allowed_dependency() {
+        // lib is old enough, app is too young: upgrading lib alone could
+        // break the installed app, so app is promoted alongside it.
+        let d = evaluate(
+            &[candidate("app"), candidate("lib")],
+            &pubs(&[
+                ("app", published_days_ago(1)),
+                ("lib", published_days_ago(10)),
+            ]),
+            &[coupled("app", "lib")],
+            &config(),
+            NOW,
+        );
+        assert_eq!(verdict_of(&d, "lib"), Verdict::Allow);
+        assert_eq!(verdict_of(&d, "app"), Verdict::Promote);
+    }
+
+    #[test]
+    fn coupling_does_not_promote_the_dependency() {
+        // The reverse direction is safe by time ordering (the allowed
+        // candidate predates the blocked dependency), so nothing changes.
+        let d = evaluate(
+            &[candidate("app"), candidate("lib")],
+            &pubs(&[
+                ("app", published_days_ago(10)),
+                ("lib", published_days_ago(1)),
+            ]),
+            &[coupled("app", "lib")],
+            &config(),
+            NOW,
+        );
+        assert_eq!(verdict_of(&d, "app"), Verdict::Allow);
+        assert_eq!(verdict_of(&d, "lib"), Verdict::Block);
+    }
+
+    #[test]
+    fn coupling_promotes_transitively() {
+        // lib allowed -> promote app -> app now upgrades underneath
+        // held-back gui -> promote gui.
+        let d = evaluate(
+            &[candidate("gui"), candidate("app"), candidate("lib")],
+            &pubs(&[
+                ("gui", published_days_ago(1)),
+                ("app", published_days_ago(1)),
+                ("lib", published_days_ago(10)),
+            ]),
+            &[coupled("app", "lib"), coupled("gui", "app")],
+            &config(),
+            NOW,
+        );
+        assert_eq!(verdict_of(&d, "lib"), Verdict::Allow);
+        assert_eq!(verdict_of(&d, "app"), Verdict::Promote);
+        assert_eq!(verdict_of(&d, "gui"), Verdict::Promote);
+    }
+
+    #[test]
+    fn unpromotable_dependent_blocks_the_dependency() {
+        // app is always_block-listed: it can never be promoted, so the
+        // allowed dependency must not move underneath its installed version.
+        let mut cfg = config();
+        cfg.always_block = vec!["app".to_string()];
+        let d = evaluate(
+            &[candidate("app"), candidate("lib")],
+            &pubs(&[
+                ("app", published_days_ago(1)),
+                ("lib", published_days_ago(10)),
+            ]),
+            &[coupled("app", "lib")],
+            &cfg,
+            NOW,
+        );
+        assert_eq!(verdict_of(&d, "app"), Verdict::Block);
+        assert_eq!(verdict_of(&d, "lib"), Verdict::Block);
+        assert!(
+            d.iter()
+                .find(|x| x.candidate.name == "lib")
+                .unwrap()
+                .reasons
+                .iter()
+                .any(|r| r.contains("held-back dependent"))
+        );
+    }
+
+    #[test]
+    fn coupling_blocked_dependency_is_not_repromoted() {
+        // app requires lib>=2.0 (promotes lib), but held-back gui couples
+        // lib: lib cannot move, so app must be held back too.
+        let reqs = vec![
+            Requirement {
+                dependent: "app".to_string(),
+                dep: DepSpec::parse("lib>=2.0").unwrap(),
+                status: RequirementStatus::RequiresCandidate {
+                    name: "lib".to_string(),
+                },
+            },
+            coupled("gui", "lib"),
+        ];
+        let mut cfg = config();
+        cfg.always_block = vec!["gui".to_string()];
+        let d = evaluate(
+            &[candidate("app"), candidate("lib"), candidate("gui")],
+            &pubs(&[
+                ("app", published_days_ago(10)),
+                ("lib", published_days_ago(1)),
+                ("gui", published_days_ago(1)),
+            ]),
+            &reqs,
+            &cfg,
+            NOW,
+        );
+        assert_eq!(verdict_of(&d, "gui"), Verdict::Block);
+        assert_eq!(verdict_of(&d, "lib"), Verdict::Block);
+        assert_eq!(verdict_of(&d, "app"), Verdict::Block);
+    }
+
+    #[test]
+    fn strict_closure_blocks_dependency_under_held_back_dependent() {
+        let mut cfg = config();
+        cfg.dependency_policy = DependencyPolicy::StrictClosure;
+        let d = evaluate(
+            &[candidate("app"), candidate("lib")],
+            &pubs(&[
+                ("app", published_days_ago(1)),
+                ("lib", published_days_ago(10)),
+            ]),
+            &[coupled("app", "lib")],
+            &cfg,
+            NOW,
+        );
+        assert_eq!(verdict_of(&d, "app"), Verdict::Block);
+        assert_eq!(verdict_of(&d, "lib"), Verdict::Block);
+    }
+
+    #[test]
+    fn strict_closure_leaves_coupled_allowed_pair_alone() {
+        let mut cfg = config();
+        cfg.dependency_policy = DependencyPolicy::StrictClosure;
+        let d = evaluate(
+            &[candidate("app"), candidate("lib")],
+            &pubs(&[
+                ("app", published_days_ago(10)),
+                ("lib", published_days_ago(10)),
+            ]),
+            &[coupled("app", "lib")],
             &cfg,
             NOW,
         );

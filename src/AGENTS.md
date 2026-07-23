@@ -9,7 +9,7 @@ This file is written for AI coding agents. It describes the project as it curren
 1. Discover upgradable packages via `pacman -Qu` (repo) and the configured AUR helper's `-Qua` (AUR). The helper is `paru`, `yay`, or `none` (AUR handling disabled), set via `aur_helper` / `--aur-helper` and chosen interactively on first run.
 2. Determine the real publication timestamp of each candidate version: the Arch Linux Archive is authoritative (first appearance in the package pool), the repo sync DB `%BUILDDATE%` is the fallback, and AUR packages are "unknown" unless the `LastModified` heuristic is enabled.
 3. Compare the package age against a configurable threshold (default 4 days).
-4. Enforce dependency safety: required younger dependencies are promoted (`dependency-respecting`, default) or their dependents are blocked (`strict-closure`).
+4. Enforce dependency safety: required younger dependencies are promoted (`dependency-respecting`, default) or their dependents are blocked (`strict-closure`). Co-pending packages linked by a dependency edge share a verdict: an allowed dependency is never upgraded while a dependent is held back (the dependent is promoted, or the dependency blocked) — Arch rarely versions deps, so this closes the unversioned-soname partial-upgrade hole.
 5. Optionally apply the resulting safe upgrade set via `sudo pacman -S` / `<aur-helper> -S` when `--apply` is passed. Dry-run is the default.
 
 ### Age Source Strategy
@@ -19,7 +19,7 @@ The authoritative source for a package version's publication date is the **Arch 
 - **Index format gotcha:** archive.archlinux.org serves an nginx autoindex with `DD-Mon-YYYY HH:MM` timestamps; `src/publication/archive.rs` parses both that and ISO `YYYY-MM-DD HH:MM`. hrefs are percent-encoded (`+` becomes `%2B`) and are decoded before matching.
 - **Pool retention:** old versions are pruned from the pool, so very old candidates resolve as "unknown" and fall back to `%BUILDDATE%`. Real candidates (just-published versions) are always present.
 - **File names omit the epoch:** candidate `1:2.0-1` matches pool file `2.0-1`.
-- **AUR git history (primary):** the RPC has no per-version publication timestamp, but every AUR package is a git repo. `src/publication/aur_git.rs` keeps bare clones under `~/.cache/pactience/aur-git/`, walks `.SRCINFO` history newest-to-oldest (reconstructing `[epoch:]pkgver-pkgrel` per commit, since `pkgver`/`pkgrel` are on *separate* lines there), and dates the candidate to the oldest commit in the contiguous top-run matching it — so a pkgrel rebuild counts as a fresh publication. Falls back to the `pkgver=` bump in `PKGBUILD` for very old history. Disable with `aur_git = false` / `--no-aur-git`.
+- **AUR git history (primary):** the RPC has no per-version publication timestamp, but every AUR package is a git repo. `src/publication/aur_git.rs` keeps bare clones under `~/.cache/pactience/aur-git/`, walks `.SRCINFO` history newest-to-oldest (reconstructing `[epoch:]pkgver-pkgrel` per commit, since `pkgver`/`pkgrel` are on *separate* lines there), and dates the candidate to the oldest commit in the contiguous top-run matching it — so a pkgrel rebuild counts as a fresh publication. Falls back to the `pkgver=` bump in `PKGBUILD` for very old history. Disable with `aur_git = false` / `--no-aur-git`. Commit dates are forgeable, so histories with non-monotonic timestamps (beyond a 24h clock-skew tolerance; the AUR is append-only) are rejected as tampered and fail safe to weaker sources.
 - **AUR heuristic (optional fallback):** when git lookup is disabled or fails, the RPC `LastModified` field can be used via `aur_heuristic` / `--aur-heuristic`; results are labelled `aur-lastmodified (heuristic)`.
 
 ### Current State
@@ -32,7 +32,7 @@ The tool is fully implemented per phases 1–6 of `INSTRUCTIONS.md`: CLI, discov
 - **Build System:** Cargo.
 - **Target OS:** Arch Linux (the tool shells out to `pacman` and the configured AUR helper — `paru` or `yay` — and reads `/var/lib/pacman/sync/*.db` + `/var/lib/pacman/local/`).
 - **Data Sources:** Arch repository sync databases, Arch Archive package pool, AUR RPC v5.
-- **Configuration:** `~/.config/pactience/config.toml`. Created automatically on first execution from a fully-commented template (`config::CONFIG_TEMPLATE`, kept honest by a parse-to-defaults test) plus the AUR helper chosen on first run (`config::write_config_with_helper`): interactively when stdin is a TTY and `--json` is not set, otherwise auto-detected from PATH (`config::detect_aur_helper`, paru preferred) with paru as fallback; `--config`, `--clear-cache`, and `--json` runs never prompt. Every option has a built-in default. A missing *explicitly passed* `--config` path is a warning, not auto-created (likely a typo).
+- **Configuration:** `~/.config/pactience/config.toml`. Created automatically on first execution from a fully-commented template (`config::CONFIG_TEMPLATE`, kept honest by a parse-to-defaults test) plus the sources and AUR helper chosen on first run (`config::write_config_with_choices`): interactively when stdin is a TTY and `--json` is not set, otherwise both sources plus PATH detection (`config::detect_aur_helper`, paru preferred); `--config`, `--clear-cache`, `--set-min-age`, and `--json` runs never prompt. Every option has a built-in default. A missing *explicitly passed* `--config` path is a warning, not auto-created (likely a typo). An existing config that predates an option (currently `sources`, detected via `config::sources_missing_from`) triggers a one-time interactive prompt whose choice is appended to the file (`config::record_sources`); non-interactive runs silently keep the default, and an explicit `--sources` flag suppresses the question and wins over the file. `--set-min-age N` persists `min_age_days` into the config file (created from the template when missing; an existing active line is replaced in place) and exits.
 - **Cache:** `~/.cache/pactience/publications.json`. Positive publication results never expire (immutable facts); negative ("unknown") results expire after `cache_ttl_secs` (default 86400).
 
 ## Build and Run Commands
@@ -64,6 +64,7 @@ All cargo commands run from the crate directory (`src/`).
 ├── .docker/                  # Dev container (compose mounts repo root at /workspace;
 │                             #   target-cache -> /workspace/src/target, dist -> /workspace/src/dist)
 ├── console.example           # Captured real-world run (linked from the root README)
+├── CHANGELOG.md              # Keep-a-Changelog release notes (update on every release)
 ├── README.md                 # Repo-facing readme (may reference repo-level files)
 ├── LICENSE-MIT, LICENSE-APACHE
 └── src/                      # THE CRATE (pactience)
@@ -74,10 +75,12 @@ All cargo commands run from the crate directory (`src/`).
     ├── Makefile              # build / dist (copies release binary to dist/)
     ├── src/
     │   ├── main.rs             # Wiring: CLI -> config -> discovery -> publication -> policy -> output -> apply
-    │   ├── cli.rs              # clap CLI definition (--apply, --json, --config, -m/--min-age-days, --color,
-    │   │                       #   -v/-q, --summary-only, --clear-cache, ...)
-    │   ├── config.rs           # TOML config load/merge/validate; first-run template + AUR helper
-    │   │                       #   selection (prompt/PATH detect); XDG paths; DependencyPolicy, AurHelper
+    │   ├── cli.rs              # clap CLI definition (--apply, --json, --config, -m/--min-age-days,
+    │   │                       #   --set-min-age, --color, -v/-q, --summary-only, --clear-cache, ...)
+    │   ├── config.rs           # TOML config load/merge/validate; first-run template + sources and
+    │   │                       #   AUR helper selection (prompt/PATH detect); --set-min-age writer;
+    │   │                       #   XDG paths; DependencyPolicy, AurHelper; sources is
+    │   │                       #   Vec<model::PackageSource> (each managed source listed)
     │   ├── error.rs            # Central thiserror Error type
     │   ├── logging.rs          # Leveled stderr diagnostics (error/warn/info/debug from -q/-v/-vv)
     │   ├── model.rs            # UpgradeCandidate, Publication(+Basis), Decision, Verdict
@@ -86,7 +89,8 @@ All cargo commands run from the crate directory (`src/`).
     │   ├── discovery.rs        # pacman -Qu / <aur-helper> -Qua parsing behind CommandRunner trait
     │   ├── db.rs               # Sync DB reader (tar + gzip/zstd, magic-byte sniffed), local DB reader,
     │   │                       #   DepSpec/Provide parsing, provides index
-    │   ├── deps.rs             # Dependency classification: installed / requires-candidate / unsatisfied
+    │   ├── deps.rs             # Dependency classification: installed / requires-candidate /
+    │   │                       #   coupled-with-candidate / unsatisfied
     │   ├── policy.rs           # Age verdicts + dependency-respecting / strict-closure fixpoint
     │   ├── progress.rs         # Minimal stderr progress bar for slow passes (TTY, default verbosity only)
     │   ├── publication/
@@ -115,15 +119,15 @@ All cargo commands run from the crate directory (`src/`).
 
 Run tests with `cargo test` (unit tests live in `#[cfg(test)]` modules; CLI tests in `tests/cli.rs`). The suite covers:
 
-- `pacman -Qu`/`<aur-helper> -Qua` parsing (ignored lines, malformed lines, dedupe, helper program selection, `AurHelper::None` skips AUR silently).
+- `pacman -Qu`/`<aur-helper> -Qua` parsing (ignored lines, malformed lines, dedupe, helper program selection, `AurHelper::None` skips AUR silently, a `sources` list without `repo`/`aur` skips the other side's commands entirely).
 - alpm vercmp edge cases (epoch, pkgrel, alpha segments, leading zeros).
 - Sync/local DB parsing incl. a generated tar fixture; DepSpec/Provide parsing.
 - Archive index parsing (both date formats, epoch stripping, prefix collisions) with a mock `HttpClient`.
 - AUR RPC parsing and the heuristic source (version-match guard).
 - AUR git source: `.SRCINFO` version reconstruction, contiguous-run dating (pkgrel bumps redate), clone/fetch behavior, PKGBUILD fallback, all via a scripted `CommandRunner`. Validated live against `aur.archlinux.org/paru.git`.
 - Cache TTL semantics (positives immortal, negatives expire), corrupt-cache recovery, and `cache::clear` idempotency (`--clear-cache` wipes the whole cache dir incl. `aur-git/`, then exits before any config creation or analysis).
-- First-run config template: parses to exact defaults, documents every option, creates parent dirs, never overwrites an existing file. AUR helper selection: `parse_helper_choice` (numbers/names/empty/invalid), `detect_aur_helper_with` (paru preferred over yay), the prompt loop (invalid → re-ask, empty/EOF → default), and `write_config_with_helper` recording the active choice.
-- Policy engine: age thresholds, unknown-age rule, allow/block lists, promotion chains, `always_block` dependents, strict-closure transitivity.
+- First-run config template: parses to exact defaults, documents every option, creates parent dirs, never overwrites an existing file. First-run selection: `parse_helper_choice` and `parse_sources_choice` (numbers/names/empty/invalid), `detect_aur_helper_with` (paru preferred over yay), the prompt loops (invalid → re-ask, empty/EOF → default), and `write_config_with_choices` recording the active choices. `set_min_age_days`: creates a missing file from the template, replaces an active `min_age_days` line in place, appends when only commented, rejects unreasonable values.
+- Policy engine: age thresholds, unknown-age rule, allow/block lists, promotion chains, `always_block` dependents, strict-closure transitivity, and co-pending coupling (held-back dependents promote alongside an allowed dependency; unpromotable dependents block the dependency, incl. no re-promotion of coupling-blocked packages).
 - Apply plan construction (repo/aur split, blocked filtering, root vs. sudo, configured helper program, `AurHelper::None` + AUR upgrade is an error) with a recording `Executor`.
 - Verbosity mapping (`-q`/default/`-v`/`-vv` -> error/warn/info/debug) and quiet/verbose conflict.
 - Progress bar: verbosity gating (default level + TTY only), bar rendering proportions, label truncation.

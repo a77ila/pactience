@@ -1,0 +1,44 @@
+# Merge a PR with a GitLab-style merge commit message:
+#
+#     Merge branch '<source>' into '<target>'
+#
+#     See pull request <owner>/<repo>#<pr>
+#
+# Trigger: comment `/merge` on a pull request. The `#N` reference is
+# linkified by GitHub.
+name: gitlab-style-merge
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  merge:
+    # Only repo owner, org members, and collaborators may trigger a merge.
+    # author_association is assigned by GitHub and cannot be forged by the
+    # commenter.
+    if: >-
+      github.event.issue.pull_request &&
+      github.event.comment.body == '/merge' &&
+      (github.event.comment.author_association == 'OWNER' ||
+       github.event.comment.author_association == 'MEMBER' ||
+       github.event.comment.author_association == 'COLLABORATOR')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Merge with templated commit message
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.issue.number }}
+        run: |
+          set -euo pipefail
+          source_branch=$(gh pr view "$PR" --json headRefName --jq .headRefName)
+          target_branch=$(gh pr view "$PR" --json baseRefName --jq .baseRefName)
+          gh api --method PUT "repos/$REPO/pulls/$PR/merge" \
+            -f merge_method=merge \
+            -f commit_title="Merge branch '$source_branch' into '$target_branch'" \
+            -f commit_message="See pull request $REPO#$PR"

@@ -76,7 +76,17 @@ fn run(cli: &Cli, log: &Logger) -> Result<ExitCode> {
         Some(path) => (path.clone(), true),
         None => (config::default_config_path(), false),
     };
-    if !config_path.exists() {
+
+    // Persisting a setting is a standalone action: update the config file
+    // and exit before any first-run creation or analysis happens.
+    if let Some(days) = cli.set_min_age {
+        config::set_min_age_days(&config_path, days)?;
+        println!("set min_age_days = {days} in {}", config_path.display());
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    let config_existed = config_path.exists();
+    if !config_existed {
         if explicit_path {
             // A missing explicit path is most likely a typo; do not create
             // files at surprising locations.
@@ -85,29 +95,62 @@ fn run(cli: &Cli, log: &Logger) -> Result<ExitCode> {
                 config_path.display()
             ));
         } else {
-            let helper = select_aur_helper(cli, log);
-            if let Err(e) = config::write_config_with_helper(&config_path, helper) {
+            let (sources, helper) = first_run_choices(cli, log);
+            if let Err(e) = config::write_config_with_choices(&config_path, &sources, helper) {
                 log.warn(format!(
                     "cannot create default config {}: {e}; using built-in defaults",
                     config_path.display()
                 ));
             } else {
                 log.info(format!(
-                    "created default configuration at {} (aur_helper = {helper})",
-                    config_path.display()
+                    "created default configuration at {} (sources = {}, aur_helper = {helper})",
+                    config_path.display(),
+                    config::format_sources(&sources)
                 ));
             }
         }
     }
+    // Upgrade path: a config written by an older version has no `sources`
+    // key. Ask once (interactive runs only) and record the choice so the
+    // question never repeats; non-interactive runs keep the `both` default.
+    // An explicit --sources flag suppresses the question for this run.
+    if config_existed
+        && cli.sources.is_none()
+        && !cli.json
+        && std::io::IsTerminal::is_terminal(&std::io::stdin())
+        && config::sources_missing_from(&config_path)?
+    {
+        let stdin = std::io::stdin();
+        let mut input = stdin.lock();
+        let mut stderr = std::io::stderr();
+        let sources = config::prompt_sources(
+            &mut input,
+            &mut stderr,
+            &[PackageSource::Repo, PackageSource::Aur],
+        );
+        if let Err(e) = config::record_sources(&config_path, &sources) {
+            log.warn(format!(
+                "cannot record sources in {}: {e}; using sources = [\"repo\", \"aur\"]",
+                config_path.display()
+            ));
+        } else {
+            log.info(format!(
+                "recorded sources = {} in {}",
+                config::format_sources(&sources),
+                config_path.display()
+            ));
+        }
+    }
     let config = Config::load(&config_path, cli)?;
     log.debug(format!(
-        "configuration: min_age_days={}, dependency_policy={}, allow_unknown={}, aur_heuristic={}, cache_ttl_secs={}, aur_helper={} (from {})",
+        "configuration: min_age_days={}, dependency_policy={}, allow_unknown={}, aur_heuristic={}, cache_ttl_secs={}, aur_helper={}, sources={} (from {})",
         config.min_age_days,
         config.dependency_policy,
         config.allow_unknown,
         config.aur_heuristic,
         config.cache_ttl_secs,
         config.aur_helper,
+        config::format_sources(&config.sources),
         config_path.display()
     ));
     let now = std::time::SystemTime::now()
@@ -117,7 +160,7 @@ fn run(cli: &Cli, log: &Logger) -> Result<ExitCode> {
 
     // 1. Discover upgradable packages.
     let runner = discovery::SystemCommandRunner;
-    let (candidates, warnings) = discovery::discover(&runner, config.aur_helper)?;
+    let (candidates, warnings) = discovery::discover(&runner, config.aur_helper, &config.sources)?;
     for warning in &warnings {
         log.warn(warning);
     }
@@ -331,25 +374,38 @@ fn run(cli: &Cli, log: &Logger) -> Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
-/// Choose the AUR helper on first run: interactively when stdin is a terminal
-/// (and stdout is not reserved for JSON), otherwise by probing PATH, with paru
-/// as the final fallback. The prompt can never fire when `--clear-cache` or an
-/// explicit `--config` path is given — both return before this is called.
-fn select_aur_helper(cli: &Cli, log: &Logger) -> AurHelper {
+/// Choose the managed sources and the AUR helper on first run: interactively
+/// when stdin is a terminal (and stdout is not reserved for JSON), otherwise
+/// both sources plus a PATH probe, with paru as the final fallback. When AUR
+/// is excluded the helper is recorded from the probe without asking. The
+/// prompt can never fire when `--clear-cache`, `--set-min-age`, or an
+/// explicit `--config` path is given — all return before this is called.
+fn first_run_choices(cli: &Cli, log: &Logger) -> (Vec<PackageSource>, AurHelper) {
+    const BOTH: &[PackageSource] = &[PackageSource::Repo, PackageSource::Aur];
     let detected = config::detect_aur_helper();
     let interactive = !cli.json && std::io::IsTerminal::is_terminal(&std::io::stdin());
     if interactive {
-        let default = detected.unwrap_or(AurHelper::Paru);
         let stdin = std::io::stdin();
         let mut input = stdin.lock();
         let mut stderr = std::io::stderr();
-        return config::prompt_aur_helper(&mut input, &mut stderr, default);
+        let sources = match cli.sources.clone() {
+            Some(sources) => sources,
+            None => config::prompt_sources(&mut input, &mut stderr, BOTH),
+        };
+        let helper = if sources.contains(&PackageSource::Aur) {
+            config::prompt_aur_helper(&mut input, &mut stderr, detected.unwrap_or(AurHelper::Paru))
+        } else {
+            detected.unwrap_or(AurHelper::Paru)
+        };
+        return (sources, helper);
     }
+    let sources = cli.sources.clone().unwrap_or_else(|| BOTH.to_vec());
     let helper = detected.unwrap_or(AurHelper::Paru);
     log.info(format!(
-        "selected AUR helper {helper}; change it via aur_helper in the config file or --aur-helper"
+        "selected sources = {}, AUR helper {helper}; change them via the config file",
+        config::format_sources(&sources)
     ));
-    helper
+    (sources, helper)
 }
 
 /// Gather the dependency declarations of each candidate's *candidate*
