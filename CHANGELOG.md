@@ -20,6 +20,10 @@ on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   exits. Creates the file from the template when missing; replaces an
   existing active line in place.
 - The JSON report now includes the active `sources`.
+- `/merge` pull-request comment command (GitHub Actions): merges the PR with
+  a GitLab-style commit message (`Merge branch '<source>' into '<target>'`
+  plus a `See pull request <repo>#<n>` trailer). Restricted to the repo
+  owner, org members, and collaborators.
 
 ### Fixed
 
