@@ -22,9 +22,12 @@ fn help_succeeds_and_lists_flags() {
         "--json",
         "--config",
         "--min-age-days",
+        "--set-min-age",
         "--dependency-policy",
         "--aur-heuristic",
         "--allow-unknown",
+        "--aur-helper",
+        "--sources",
         "--verbose",
         "--quiet",
         "--summary-only",
@@ -71,6 +74,15 @@ fn invalid_dependency_policy_is_rejected() {
 }
 
 #[test]
+fn invalid_sources_choice_is_rejected() {
+    let out = pactience(&["--sources", "everything"]);
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("repo"));
+    assert!(stderr.contains("aur"));
+}
+
+#[test]
 fn unknown_flag_is_rejected() {
     let out = pactience(&["--definitely-not-a-flag"]);
     assert!(!out.status.success());
@@ -81,6 +93,45 @@ fn summary_only_conflicts_with_json() {
     let out = pactience(&["--summary-only", "--json"]);
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("--summary-only"));
+}
+
+#[test]
+fn set_min_age_writes_the_config_and_exits() {
+    // XDG_CONFIG_HOME redirects the config to a temp dir so the real user
+    // configuration is never touched.
+    let dir = std::env::temp_dir().join(format!("aag-cli-setmin-{}", std::process::id()));
+    let config_path = dir.join("pactience/config.toml");
+
+    // Missing file: created from the template with the active setting.
+    let out = Command::new(env!("CARGO_BIN_EXE_pactience"))
+        .args(["--set-min-age", "9"])
+        .env("XDG_CONFIG_HOME", &dir)
+        .output()
+        .expect("binary must run");
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("min_age_days = 9"), "stdout: {stdout}");
+    let contents = std::fs::read_to_string(&config_path).unwrap();
+    assert!(contents.contains("min_age_days = 9"));
+    assert!(contents.contains("# min_age_days = 4"));
+
+    // Existing file: the active line is replaced, not duplicated.
+    let out = Command::new(env!("CARGO_BIN_EXE_pactience"))
+        .args(["--set-min-age", "12"])
+        .env("XDG_CONFIG_HOME", &dir)
+        .output()
+        .expect("binary must run");
+    assert!(out.status.success());
+    let contents = std::fs::read_to_string(&config_path).unwrap();
+    assert!(contents.contains("min_age_days = 12"));
+    assert!(!contents.contains("min_age_days = 9\n"));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn set_min_age_conflicts_with_min_age_days() {
+    let out = pactience(&["--set-min-age", "9", "--min-age-days", "2"]);
+    assert!(!out.status.success());
 }
 
 #[test]

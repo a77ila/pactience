@@ -54,30 +54,40 @@ pub fn format_command(program: &str, args: &[&str]) -> String {
         .join(" ")
 }
 
-/// Discover all upgrade candidates. The AUR helper is optional: when it is
-/// missing, only repository upgrades are reported and a warning is recorded.
-/// `AurHelper::None` disables AUR discovery entirely (no warning — repo-only
-/// is the explicit configuration).
+/// Discover all upgrade candidates from the enabled sources. The AUR helper
+/// is optional: when it is missing, only repository upgrades are reported and
+/// a warning is recorded. `AurHelper::None` disables AUR discovery entirely
+/// (no warning — repo-only is the explicit configuration).
 pub fn discover(
     runner: &dyn CommandRunner,
     helper: AurHelper,
+    sources: &[PackageSource],
 ) -> Result<(Vec<UpgradeCandidate>, Vec<String>)> {
     let mut warnings = Vec::new();
     let mut candidates = Vec::new();
 
-    let repo_out = runner.run("pacman", &["-Qu"])?;
-    check_listing_status("pacman -Qu", &repo_out, &mut warnings);
-    candidates.extend(parse_qu_output(&repo_out.stdout, PackageSource::Repo));
+    if sources.contains(&PackageSource::Repo) {
+        let repo_out = runner.run("pacman", &["-Qu"])?;
+        check_listing_status("pacman -Qu", &repo_out, &mut warnings);
+        candidates.extend(parse_qu_output(&repo_out.stdout, PackageSource::Repo));
+    }
 
-    if let Some(program) = helper.program() {
-        match runner.run(program, &["-Qua"]) {
-            Ok(aur_out) => {
-                check_listing_status(&format!("{program} -Qua"), &aur_out, &mut warnings);
-                candidates.extend(parse_qu_output(&aur_out.stdout, PackageSource::Aur));
+    if sources.contains(&PackageSource::Aur) {
+        if let Some(program) = helper.program() {
+            match runner.run(program, &["-Qua"]) {
+                Ok(aur_out) => {
+                    check_listing_status(&format!("{program} -Qua"), &aur_out, &mut warnings);
+                    candidates.extend(parse_qu_output(&aur_out.stdout, PackageSource::Aur));
+                }
+                Err(e) => warnings.push(format!(
+                    "AUR discovery unavailable ({e}); continuing with repository packages only"
+                )),
             }
-            Err(e) => warnings.push(format!(
-                "AUR discovery unavailable ({e}); continuing with repository packages only"
-            )),
+        } else if !sources.contains(&PackageSource::Repo) {
+            warnings.push(
+                "sources = [\"aur\"] but aur_helper = \"none\"; no AUR discovery possible"
+                    .to_string(),
+            );
         }
     }
 
@@ -197,12 +207,16 @@ mod tests {
         assert_eq!(c[0].source, PackageSource::Aur);
     }
 
+    const BOTH: &[PackageSource] = &[PackageSource::Repo, PackageSource::Aur];
+    const REPO: &[PackageSource] = &[PackageSource::Repo];
+    const AUR: &[PackageSource] = &[PackageSource::Aur];
+
     #[test]
     fn discover_combines_sources_and_survives_missing_paru() {
         let runner = FakeRunner {
             responses: vec![FakeRunner::ok("pacman", "linux 1-1 -> 2-1\n")],
         };
-        let (candidates, warnings) = discover(&runner, AurHelper::Paru).unwrap();
+        let (candidates, warnings) = discover(&runner, AurHelper::Paru, BOTH).unwrap();
         assert_eq!(candidates.len(), 1);
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("AUR discovery unavailable"));
@@ -216,7 +230,7 @@ mod tests {
                 FakeRunner::ok("yay", "paru-bin 1-1 -> 2-1\n"),
             ],
         };
-        let (candidates, warnings) = discover(&runner, AurHelper::Yay).unwrap();
+        let (candidates, warnings) = discover(&runner, AurHelper::Yay, BOTH).unwrap();
         assert!(warnings.is_empty());
         assert_eq!(candidates.len(), 2);
         assert_eq!(candidates[1].name, "paru-bin");
@@ -228,7 +242,7 @@ mod tests {
         let runner = FakeRunner {
             responses: vec![FakeRunner::ok("pacman", "linux 1-1 -> 2-1\n")],
         };
-        let (candidates, warnings) = discover(&runner, AurHelper::None).unwrap();
+        let (candidates, warnings) = discover(&runner, AurHelper::None, BOTH).unwrap();
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].source, PackageSource::Repo);
         assert!(warnings.is_empty());
@@ -242,9 +256,44 @@ mod tests {
                 FakeRunner::ok("paru", "foo 1-1 -> 2-1\nbar 3-1 -> 4-1\n"),
             ],
         };
-        let (candidates, _) = discover(&runner, AurHelper::Paru).unwrap();
+        let (candidates, _) = discover(&runner, AurHelper::Paru, BOTH).unwrap();
         assert_eq!(candidates.len(), 2);
         let foo = candidates.iter().find(|c| c.name == "foo").unwrap();
         assert_eq!(foo.source, PackageSource::Repo);
+    }
+
+    #[test]
+    fn sources_repo_never_touches_the_aur_helper() {
+        // The runner has no paru response: an AUR call would produce the
+        // "unavailable" warning, so a clean run proves it was skipped.
+        let runner = FakeRunner {
+            responses: vec![FakeRunner::ok("pacman", "linux 1-1 -> 2-1\n")],
+        };
+        let (candidates, warnings) = discover(&runner, AurHelper::Paru, REPO).unwrap();
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].source, PackageSource::Repo);
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn sources_aur_never_touches_pacman() {
+        // No pacman response: a repo call would hard-error (`?`), so success
+        // proves pacman was skipped.
+        let runner = FakeRunner {
+            responses: vec![FakeRunner::ok("paru", "paru-bin 1-1 -> 2-1\n")],
+        };
+        let (candidates, warnings) = discover(&runner, AurHelper::Paru, AUR).unwrap();
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].source, PackageSource::Aur);
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn sources_aur_with_helper_none_warns() {
+        let runner = FakeRunner { responses: vec![] };
+        let (candidates, warnings) = discover(&runner, AurHelper::None, AUR).unwrap();
+        assert!(candidates.is_empty());
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("sources = [\"aur\"]"));
     }
 }

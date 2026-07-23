@@ -67,6 +67,7 @@ make dist        # produces dist/pactience
 ```bash
 pactience                 # dry-run report (table)
 pactience -m 7            # require a 7-day minimum age
+pactience --set-min-age 7 # persist min_age_days = 7 in the config and exit
 pactience --apply         # install the allowed set
 pactience --json          # machine-readable report
 pactience -v              # one info line per action (-vv for debug)
@@ -86,14 +87,16 @@ hint: 1 package(s) blocked; whitelist trusted packages via always_allow in ~/.co
 ```
 
 Notable flags: `--dependency-policy`, `--aur-heuristic`, `--no-aur-git`,
-`--aur-helper`, `--allow-unknown`, `--config`, `-q/--quiet`, `--summary-only`,
-`--clear-cache`. See `--help`.
+`--aur-helper`, `--sources`, `--allow-unknown`, `--set-min-age`, `--config`,
+`-q/--quiet`, `--summary-only`, `--clear-cache`. See `--help`.
 
 ## Configuration
 
-On first run you are asked which AUR helper to use (`paru`, `yay`, or `none`;
-non-interactive runs auto-detect from PATH, falling back to `paru`) and a
-fully commented template plus your choice is written to
+On first run you are asked which package sources to manage (`both`, `repo`
+only, or `aur` only) and which AUR helper to use (`paru`, `yay`, or `none`;
+non-interactive runs default to `both` and auto-detect the helper from PATH,
+falling back to `paru`) and a
+fully commented template plus your choices is written to
 `~/.config/pactience/config.toml`. All options (defaults shown):
 
 ```toml
@@ -106,6 +109,7 @@ fully commented template plus your choice is written to
 # aur_heuristic = false               # gate AUR by RPC LastModified
 # aur_git = true                      # accurate AUR dates from git history
 # aur_helper = "paru"                 # "paru", "yay", or "none"
+# sources = ["repo", "aur"]       # or ["repo"] only, or ["aur"] only
 ```
 
 CLI flags override the file. Publication results are cached in

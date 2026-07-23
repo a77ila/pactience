@@ -34,6 +34,7 @@ struct JsonReport {
     generated_at: i64,
     min_age_days: u32,
     dependency_policy: String,
+    sources: Vec<String>,
     summary: JsonSummary,
     decisions: Vec<JsonDecision>,
 }
@@ -59,6 +60,7 @@ pub fn render_json(decisions: &[Decision], config: &Config, now: i64) -> String 
         generated_at: now,
         min_age_days: config.min_age_days,
         dependency_policy: config.dependency_policy.to_string(),
+        sources: config.sources.iter().map(|s| s.to_string()).collect(),
         summary: JsonSummary {
             total: decisions.len(),
             allowed,

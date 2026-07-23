@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Where an upgrade candidate originates from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, clap::ValueEnum)]
 #[serde(rename_all = "lowercase")]
 pub enum PackageSource {
     /// Official Arch repositories (discovered via `pacman -Qu`).
