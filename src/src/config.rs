@@ -30,6 +30,30 @@ impl std::fmt::Display for DependencyPolicy {
     }
 }
 
+/// How to handle brand-new (not yet installed) dependencies of upgrades.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, clap::ValueEnum)]
+#[serde(rename_all = "kebab-case")]
+pub enum NewDependencyPolicy {
+    /// Never install new dependencies: a candidate requiring one is blocked
+    /// (default, the historical behavior).
+    Block,
+    /// Install new dependencies that pass the age policy, and print a
+    /// warning for each one.
+    Warn,
+    /// Install new dependencies that pass the age policy, silently.
+    Allow,
+}
+
+impl std::fmt::Display for NewDependencyPolicy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            NewDependencyPolicy::Block => write!(f, "block"),
+            NewDependencyPolicy::Warn => write!(f, "warn"),
+            NewDependencyPolicy::Allow => write!(f, "allow"),
+        }
+    }
+}
+
 /// AUR helper used to discover (`-Qua`) and apply (`-S`) AUR upgrades.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, clap::ValueEnum)]
 #[serde(rename_all = "kebab-case")]
@@ -89,6 +113,8 @@ pub struct Config {
     pub always_allow: Vec<String>,
     pub always_block: Vec<String>,
     pub dependency_policy: DependencyPolicy,
+    /// How to handle brand-new (not yet installed) repo dependencies.
+    pub new_dependencies: NewDependencyPolicy,
     /// How long a *negative* cache entry ("publication unknown") stays valid.
     /// Positive results are immutable facts and never expire.
     pub cache_ttl_secs: u64,
@@ -111,6 +137,7 @@ struct FileConfig {
     always_allow: Option<Vec<String>>,
     always_block: Option<Vec<String>>,
     dependency_policy: Option<DependencyPolicy>,
+    new_dependencies: Option<NewDependencyPolicy>,
     cache_ttl_secs: Option<u64>,
     allow_unknown: Option<bool>,
     aur_heuristic: Option<bool>,
@@ -126,6 +153,7 @@ impl Default for Config {
             always_allow: Vec::new(),
             always_block: Vec::new(),
             dependency_policy: DependencyPolicy::DependencyRespecting,
+            new_dependencies: NewDependencyPolicy::Block,
             cache_ttl_secs: 86_400,
             allow_unknown: false,
             aur_heuristic: false,
@@ -168,6 +196,9 @@ impl Config {
         if let Some(v) = file.dependency_policy {
             self.dependency_policy = v;
         }
+        if let Some(v) = file.new_dependencies {
+            self.new_dependencies = v;
+        }
         if let Some(v) = file.cache_ttl_secs {
             self.cache_ttl_secs = v;
         }
@@ -196,6 +227,9 @@ impl Config {
         }
         if let Some(v) = cli.dependency_policy {
             self.dependency_policy = v;
+        }
+        if let Some(v) = cli.new_dependencies {
+            self.new_dependencies = v;
         }
         if cli.aur_heuristic {
             self.aur_heuristic = true;
@@ -265,6 +299,19 @@ pub const CONFIG_TEMPLATE: &str = r#"# pactience configuration
 #                                      the upgrade set
 #   "strict-closure"         never promote; block the dependent package
 # dependency_policy = "dependency-respecting"
+
+# What to do when an upgrade requires a brand-new dependency that is not
+# installed yet (e.g. telegram-desktop gaining a cmark-gfm dependency):
+#   "block"  (default) block the upgrade; never install new packages
+#            (the missing package is listed as blocked in the report)
+#   "warn"   install new dependencies that pass the same min-age policy,
+#            printing a warning for each one (on stderr and in the report)
+#   "allow"  install new dependencies that pass the same min-age policy,
+#            silently
+# Only official-repo dependencies can be resolved this way; a dependency
+# that is too young, of unknown age, or only in the AUR still blocks the
+# upgrade.
+# new_dependencies = "block"
 
 # How long (seconds) a "publication unknown" cache entry stays valid before
 # it is looked up again. Positive results are historical facts and never
@@ -632,6 +679,26 @@ aur_heuristic = true
     }
 
     #[test]
+    fn new_dependencies_from_file_cli_and_default() {
+        assert_eq!(
+            Config::default().new_dependencies,
+            NewDependencyPolicy::Block
+        );
+
+        let dir = std::env::temp_dir().join(format!("aag-test-newdep-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        std::fs::write(&path, "new_dependencies = \"warn\"\n").unwrap();
+        let config = Config::load(&path, &cli(&[])).unwrap();
+        assert_eq!(config.new_dependencies, NewDependencyPolicy::Warn);
+
+        // CLI wins over the file.
+        let config = Config::load(&path, &cli(&["--new-dependencies", "allow"])).unwrap();
+        assert_eq!(config.new_dependencies, NewDependencyPolicy::Allow);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn template_parses_to_defaults() {
         // Guards against template drift when options change: every key in the
         // template must be a real option, and a fully-commented template must
@@ -650,6 +717,7 @@ aur_heuristic = true
             "always_allow",
             "always_block",
             "dependency_policy",
+            "new_dependencies",
             "cache_ttl_secs",
             "allow_unknown",
             "aur_heuristic",

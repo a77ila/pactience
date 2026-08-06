@@ -74,6 +74,57 @@ pub fn analyze(
     requirements
 }
 
+/// `installed_version` marker used for synthetic candidates that were never
+/// installed (pulled in as brand-new dependencies).
+pub const NEW_PACKAGE_INSTALLED: &str = "-";
+
+/// Collect brand-new repo dependencies that could satisfy currently
+/// `Unsatisfied` requirements, as synthetic upgrade candidates.
+///
+/// A requirement qualifies when its dependency (a) is not already a
+/// candidate, (b) exists in the sync DB under its own name, and (c) the sync
+/// DB version satisfies the (possibly versioned) constraint. Results are
+/// deduplicated by name. Only direct name matches are resolved — virtual
+/// capabilities provided solely by not-installed packages stay unsatisfied,
+/// as do AUR-only packages.
+///
+/// The returned candidates use [`NEW_PACKAGE_INSTALLED`] as their installed
+/// version; once appended to the candidate list and re-analyzed, the
+/// corresponding requirements classify as `RequiresCandidate` and flow
+/// through the normal policy engine (age gate, promotion, blocking).
+pub fn find_installable_new_deps(
+    requirements: &[Requirement],
+    syncdb: &SyncDb,
+    candidates: &[UpgradeCandidate],
+) -> Vec<UpgradeCandidate> {
+    let known: std::collections::HashSet<&str> =
+        candidates.iter().map(|c| c.name.as_str()).collect();
+    let mut seen = std::collections::HashSet::new();
+    let mut new_candidates = Vec::new();
+    for req in requirements {
+        if req.status != RequirementStatus::Unsatisfied {
+            continue;
+        }
+        let name = req.dep.name.as_str();
+        if known.contains(name) || !seen.insert(name.to_string()) {
+            continue;
+        }
+        let Some(meta) = syncdb.get(name) else {
+            continue;
+        };
+        if !req.dep.satisfied_by(&meta.version) {
+            continue;
+        }
+        new_candidates.push(UpgradeCandidate {
+            name: meta.name.clone(),
+            installed_version: NEW_PACKAGE_INSTALLED.to_string(),
+            candidate_version: meta.version.clone(),
+            source: crate::model::PackageSource::Repo,
+        });
+    }
+    new_candidates
+}
+
 fn classify(
     dep: &DepSpec,
     candidates: &HashMap<&str, &UpgradeCandidate>,
@@ -242,6 +293,92 @@ mod tests {
         let localdb = localdb_with(&[("foo", "1.0-1")]);
         let reqs = analyze(&candidates, &deps, &SyncDb::default(), &localdb);
         assert_eq!(reqs[0].status, RequirementStatus::Unsatisfied);
+    }
+
+    fn syncdb_with(pkgs: &[(&str, &str)]) -> SyncDb {
+        let mut db = SyncDb::default();
+        for (name, version) in pkgs {
+            db.packages.insert(
+                name.to_string(),
+                RepoPackageMeta {
+                    name: name.to_string(),
+                    version: version.to_string(),
+                    ..Default::default()
+                },
+            );
+        }
+        db
+    }
+
+    #[test]
+    fn unsatisfied_dep_in_syncdb_is_installable() {
+        let candidates = vec![candidate("foo", "1.0-1", "2.0-1")];
+        let deps = HashMap::from([("foo".to_string(), vec![dep("newlib")])]);
+        let localdb = localdb_with(&[("foo", "1.0-1")]);
+        let syncdb = syncdb_with(&[("newlib", "3.1-2")]);
+        let reqs = analyze(&candidates, &deps, &syncdb, &localdb);
+        assert_eq!(reqs[0].status, RequirementStatus::Unsatisfied);
+        let additions = find_installable_new_deps(&reqs, &syncdb, &candidates);
+        assert_eq!(
+            additions,
+            vec![UpgradeCandidate {
+                name: "newlib".to_string(),
+                installed_version: NEW_PACKAGE_INSTALLED.to_string(),
+                candidate_version: "3.1-2".to_string(),
+                source: PackageSource::Repo,
+            }]
+        );
+    }
+
+    #[test]
+    fn versioned_constraint_is_checked_against_syncdb() {
+        let candidates = vec![candidate("foo", "1.0-1", "2.0-1")];
+        let deps = HashMap::from([("foo".to_string(), vec![dep("newlib>=4.0")])]);
+        let localdb = localdb_with(&[("foo", "1.0-1")]);
+        let syncdb = syncdb_with(&[("newlib", "3.1-2")]);
+        let reqs = analyze(&candidates, &deps, &syncdb, &localdb);
+        // The repo version is too old for the constraint: not installable.
+        assert!(find_installable_new_deps(&reqs, &syncdb, &candidates).is_empty());
+
+        let deps = HashMap::from([("foo".to_string(), vec![dep("newlib>=3.0")])]);
+        let reqs = analyze(&candidates, &deps, &syncdb, &localdb);
+        assert_eq!(
+            find_installable_new_deps(&reqs, &syncdb, &candidates).len(),
+            1
+        );
+    }
+
+    #[test]
+    fn installable_new_deps_dedupe_and_skip_known() {
+        let unsatisfied = |dependent: &str, name: &str| Requirement {
+            dependent: dependent.to_string(),
+            dep: DepSpec::parse(name).unwrap(),
+            status: RequirementStatus::Unsatisfied,
+        };
+        let syncdb = syncdb_with(&[("newlib", "3.1-2"), ("other", "1.0-1")]);
+
+        // Two dependents needing the same new dep: one synthetic candidate.
+        let reqs = vec![unsatisfied("foo", "newlib"), unsatisfied("bar", "newlib")];
+        assert_eq!(find_installable_new_deps(&reqs, &syncdb, &[]).len(), 1);
+
+        // Already a candidate: never duplicated.
+        let candidates = vec![candidate("newlib", "1.0-1", "3.1-2")];
+        let reqs = vec![unsatisfied("foo", "newlib")];
+        assert!(find_installable_new_deps(&reqs, &syncdb, &candidates).is_empty());
+
+        // Non-unsatisfied requirements are ignored.
+        let reqs = vec![Requirement {
+            dependent: "foo".to_string(),
+            dep: DepSpec::parse("newlib").unwrap(),
+            status: RequirementStatus::SatisfiedByInstalled {
+                version: "3.1-2".to_string(),
+            },
+        }];
+        assert!(find_installable_new_deps(&reqs, &syncdb, &[]).is_empty());
+
+        // Not in the sync DB (e.g. AUR-only): stays unsatisfied.
+        let reqs = vec![unsatisfied("foo", "aur-only-lib")];
+        assert!(find_installable_new_deps(&reqs, &syncdb, &[]).is_empty());
     }
 
     #[test]

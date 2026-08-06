@@ -9,7 +9,7 @@ This file is written for AI coding agents. It describes the project as it curren
 1. Discover upgradable packages via `pacman -Qu` (repo) and the configured AUR helper's `-Qua` (AUR). The helper is `paru`, `yay`, or `none` (AUR handling disabled), set via `aur_helper` / `--aur-helper` and chosen interactively on first run.
 2. Determine the real publication timestamp of each candidate version: the Arch Linux Archive is authoritative (first appearance in the package pool), the repo sync DB `%BUILDDATE%` is the fallback, and AUR packages are "unknown" unless the `LastModified` heuristic is enabled.
 3. Compare the package age against a configurable threshold (default 4 days).
-4. Enforce dependency safety: required younger dependencies are promoted (`dependency-respecting`, default) or their dependents are blocked (`strict-closure`). Co-pending packages linked by a dependency edge share a verdict: an allowed dependency is never upgraded while a dependent is held back (the dependent is promoted, or the dependency blocked) — Arch rarely versions deps, so this closes the unversioned-soname partial-upgrade hole.
+4. Enforce dependency safety: required younger dependencies are promoted (`dependency-respecting`, default) or their dependents are blocked (`strict-closure`). Co-pending packages linked by a dependency edge share a verdict: an allowed dependency is never upgraded while a dependent is held back (the dependent is promoted, or the dependency blocked) — Arch rarely versions deps, so this closes the unversioned-soname partial-upgrade hole. Brand-new dependencies (required by a candidate, but not installed and not pending) block the dependent by default; with `new_dependencies = "warn"`/`"allow"`, sync-DB-resolvable new packages are injected as synthetic candidates (installed version `-`), gated by the same age policy but never promoted — a too-young or unknown-age new package blocks the dependent.
 5. Optionally apply the resulting safe upgrade set via `sudo pacman -S` / `<aur-helper> -S` when `--apply` is passed. Dry-run is the default.
 
 ### Age Source Strategy
@@ -90,7 +90,8 @@ All cargo commands run from the crate directory (`src/`).
     │   ├── db.rs               # Sync DB reader (tar + gzip/zstd, magic-byte sniffed), local DB reader,
     │   │                       #   DepSpec/Provide parsing, provides index
     │   ├── deps.rs             # Dependency classification: installed / requires-candidate /
-    │   │                       #   coupled-with-candidate / unsatisfied
+    │   │                       #   coupled-with-candidate / unsatisfied; resolution of
+    │   │                       #   installable brand-new dependencies from the sync DB
     │   ├── policy.rs           # Age verdicts + dependency-respecting / strict-closure fixpoint
     │   ├── progress.rs         # Minimal stderr progress bar for slow passes (TTY, default verbosity only)
     │   ├── publication/
@@ -127,7 +128,7 @@ Run tests with `cargo test` (unit tests live in `#[cfg(test)]` modules; CLI test
 - AUR git source: `.SRCINFO` version reconstruction, contiguous-run dating (pkgrel bumps redate), clone/fetch behavior, PKGBUILD fallback, all via a scripted `CommandRunner`. Validated live against `aur.archlinux.org/paru.git`.
 - Cache TTL semantics (positives immortal, negatives expire), corrupt-cache recovery, and `cache::clear` idempotency (`--clear-cache` wipes the whole cache dir incl. `aur-git/`, then exits before any config creation or analysis).
 - First-run config template: parses to exact defaults, documents every option, creates parent dirs, never overwrites an existing file. First-run selection: `parse_helper_choice` and `parse_sources_choice` (numbers/names/empty/invalid), `detect_aur_helper_with` (paru preferred over yay), the prompt loops (invalid → re-ask, empty/EOF → default), and `write_config_with_choices` recording the active choices. `set_min_age_days`: creates a missing file from the template, replaces an active `min_age_days` line in place, appends when only commented, rejects unreasonable values.
-- Policy engine: age thresholds, unknown-age rule, allow/block lists, promotion chains, `always_block` dependents, strict-closure transitivity, and co-pending coupling (held-back dependents promote alongside an allowed dependency; unpromotable dependents block the dependency, incl. no re-promotion of coupling-blocked packages).
+- Policy engine: age thresholds, unknown-age rule, allow/block lists, promotion chains, `always_block` dependents, strict-closure transitivity, and co-pending coupling (held-back dependents promote alongside an allowed dependency; unpromotable dependents block the dependency, incl. no re-promotion of coupling-blocked packages). Brand-new dependency candidates (installed version `-`) are never promoted: too young / unknown age / `always_block` blocks the dependent.
 - Apply plan construction (repo/aur split, blocked filtering, root vs. sudo, configured helper program, `AurHelper::None` + AUR upgrade is an error) with a recording `Executor`.
 - Verbosity mapping (`-q`/default/`-v`/`-vv` -> error/warn/info/debug) and quiet/verbose conflict.
 - Progress bar: verbosity gating (default level + TTY only), bar rendering proportions, label truncation.

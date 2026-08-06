@@ -41,6 +41,17 @@ pass `--apply`.
    rarely versions its dependencies, so without this a soname bump could
    slip through underneath a held-back package (the classic partial-upgrade
    breakage).
+
+   If a candidate requires a **brand-new dependency** that is not installed
+   yet, the upgrade is blocked by default and the missing package is listed
+   as a blocked row (its publication date is shown for information only).
+   With
+   `new_dependencies = "warn"` or `"allow"`, repo packages needed this way
+   are pulled into the set and gated by the same min-age policy — but never
+   promoted: a new package that is too young or of unknown age blocks the
+   dependent instead. `warn` additionally warns about every new package to
+   be installed — on stderr and in a line after the summary; `allow` is
+   silent.
 5. **Apply** — with `--apply`, the allowed set is installed via
    `sudo pacman -S` / `<aur-helper> -S` (no shell, validated package names).
 
@@ -86,7 +97,7 @@ paru               aur   2.0.0-1    2.1.0-2     2025-12-12  218d allow    publis
 hint: 1 package(s) blocked; whitelist trusted packages via always_allow in ~/.config/pactience/config.toml
 ```
 
-Notable flags: `--dependency-policy`, `--aur-heuristic`, `--no-aur-git`,
+Notable flags: `--dependency-policy`, `--new-dependencies`, `--aur-heuristic`, `--no-aur-git`,
 `--aur-helper`, `--sources`, `--allow-unknown`, `--set-min-age`, `--config`,
 `-q/--quiet`, `--summary-only`, `--clear-cache`. See `--help`.
 
@@ -104,6 +115,8 @@ fully commented template plus your choices is written to
 # always_allow = ["linux"]            # always upgrade, regardless of age
 # always_block = ["glibc"]            # never upgrade, never promote
 # dependency_policy = "dependency-respecting"   # or "strict-closure"
+# new_dependencies = "block"          # or "warn"/"allow": install brand-new
+                                     # repo dependencies that pass the age gate
 # cache_ttl_secs = 86400              # TTL for "unknown age" cache entries
 # allow_unknown = false               # allow packages with unknown age
 # aur_heuristic = false               # gate AUR by RPC LastModified
