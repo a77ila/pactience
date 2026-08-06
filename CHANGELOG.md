@@ -3,6 +3,19 @@
 All notable changes to this project are documented here. The format is based
 on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.2.1] - 2026-08-06
+
+### Added
+
+- `refresh` configuration option (default true) and `--no-refresh` flag:
+  pactience now refreshes the pacman sync databases (`sudo pacman -Sy`, or
+  plain `pacman -Sy` as root) before each run, so discovery and `--apply`
+  work on current repository data. Stale databases previously hid upgrades
+  and made downloads fail with 404s when mirrors no longer carried the
+  recorded versions. Skipped for AUR-only runs; a failed refresh degrades
+  to a warning and the run continues with possibly stale data. pacman's
+  output goes to stderr so the report (and `--json`) stays clean.
+
 ## [0.2.0] - 2026-08-06
 
 ### Added

@@ -1,9 +1,11 @@
 //! Execution of the safe upgrade set via `pacman` and the configured AUR
-//! helper.
+//! helper, plus the pre-run sync database refresh.
 //!
-//! This is the only module that can change system state. It is reached only
-//! when the user passes `--apply`; the default dry-run path never touches it
-//! beyond constructing the plan.
+//! This is the only module that can change system state. Upgrades are
+//! reached only when the user passes `--apply`; the default dry-run path
+//! never touches them beyond constructing the plan. The database refresh
+//! (`pacman -Sy`) runs before discovery whenever it is enabled, so stale
+//! sync databases cannot hide upgrades or cause 404s at download time.
 
 use crate::config::AurHelper;
 use crate::error::{Error, Result};
@@ -152,6 +154,44 @@ pub fn execute(commands: &[PlannedCommand], executor: &dyn Executor) -> Result<(
     Ok(())
 }
 
+/// Build the sync database refresh command: `sudo pacman -Sy`, or plain
+/// `pacman -Sy` when already running as root (same elevation rule as the
+/// upgrade plan).
+pub fn refresh_command(as_root: bool) -> PlannedCommand {
+    if as_root {
+        PlannedCommand {
+            program: "pacman".to_string(),
+            args: vec!["-Sy".to_string()],
+        }
+    } else {
+        PlannedCommand {
+            program: "sudo".to_string(),
+            args: vec!["pacman".to_string(), "-Sy".to_string()],
+        }
+    }
+}
+
+/// Run the database refresh, inheriting stdin/stderr so sudo can prompt for
+/// a password. pacman's chatter is redirected to stderr so the report on
+/// stdout (table or JSON) stays clean.
+pub fn run_refresh(command: &PlannedCommand) -> Result<()> {
+    let status = std::process::Command::new(&command.program)
+        .args(&command.args)
+        .stdin(std::process::Stdio::inherit())
+        .stdout(std::process::Stdio::from(std::io::stderr()))
+        .stderr(std::process::Stdio::inherit())
+        .status()
+        .map_err(|e| Error::command(command.to_string(), e.to_string()))?;
+    if !status.success() {
+        return Err(Error::CommandStatus {
+            command: command.to_string(),
+            status: format!("{status}"),
+            stderr: String::new(),
+        });
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -261,6 +301,24 @@ mod tests {
                 program: "sudo".into(),
                 args: vec!["pacman".into(), "-S".into(), "cmark-gfm".into()],
             }]
+        );
+    }
+
+    #[test]
+    fn refresh_command_elevates_unless_root() {
+        assert_eq!(
+            refresh_command(false),
+            PlannedCommand {
+                program: "sudo".into(),
+                args: vec!["pacman".into(), "-Sy".into()],
+            }
+        );
+        assert_eq!(
+            refresh_command(true),
+            PlannedCommand {
+                program: "pacman".into(),
+                args: vec!["-Sy".into()],
+            }
         );
     }
 

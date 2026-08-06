@@ -6,11 +6,12 @@ This file is written for AI coding agents. It describes the project as it curren
 
 `pactience` is a Rust CLI tool for Arch Linux that enforces a "minimum package age" policy before upgrading packages. The workflow is:
 
-1. Discover upgradable packages via `pacman -Qu` (repo) and the configured AUR helper's `-Qua` (AUR). The helper is `paru`, `yay`, or `none` (AUR handling disabled), set via `aur_helper` / `--aur-helper` and chosen interactively on first run.
-2. Determine the real publication timestamp of each candidate version: the Arch Linux Archive is authoritative (first appearance in the package pool), the repo sync DB `%BUILDDATE%` is the fallback, and AUR packages are "unknown" unless the `LastModified` heuristic is enabled.
-3. Compare the package age against a configurable threshold (default 4 days).
-4. Enforce dependency safety: required younger dependencies are promoted (`dependency-respecting`, default) or their dependents are blocked (`strict-closure`). Co-pending packages linked by a dependency edge share a verdict: an allowed dependency is never upgraded while a dependent is held back (the dependent is promoted, or the dependency blocked) — Arch rarely versions deps, so this closes the unversioned-soname partial-upgrade hole. Brand-new dependencies (required by a candidate, but not installed and not pending) block the dependent by default; with `new_dependencies = "warn"`/`"allow"`, sync-DB-resolvable new packages are injected as synthetic candidates (installed version `-`), gated by the same age policy but never promoted — a too-young or unknown-age new package blocks the dependent.
-5. Optionally apply the resulting safe upgrade set via `sudo pacman -S` / `<aur-helper> -S` when `--apply` is passed. Dry-run is the default.
+1. Refresh the pacman sync databases (`pacman -Sy`, via sudo unless root) so discovery and apply see current repository data — stale databases hide upgrades and cause 404s at download time. On by default (`refresh` / `--no-refresh`); skipped for AUR-only runs; a failed refresh degrades to a warning.
+2. Discover upgradable packages via `pacman -Qu` (repo) and the configured AUR helper's `-Qua` (AUR). The helper is `paru`, `yay`, or `none` (AUR handling disabled), set via `aur_helper` / `--aur-helper` and chosen interactively on first run.
+3. Determine the real publication timestamp of each candidate version: the Arch Linux Archive is authoritative (first appearance in the package pool), the repo sync DB `%BUILDDATE%` is the fallback, and AUR packages are "unknown" unless the `LastModified` heuristic is enabled.
+4. Compare the package age against a configurable threshold (default 4 days).
+5. Enforce dependency safety: required younger dependencies are promoted (`dependency-respecting`, default) or their dependents are blocked (`strict-closure`). Co-pending packages linked by a dependency edge share a verdict: an allowed dependency is never upgraded while a dependent is held back (the dependent is promoted, or the dependency blocked) — Arch rarely versions deps, so this closes the unversioned-soname partial-upgrade hole. Brand-new dependencies (required by a candidate, but not installed and not pending) block the dependent by default; with `new_dependencies = "warn"`/`"allow"`, sync-DB-resolvable new packages are injected as synthetic candidates (installed version `-`), gated by the same age policy but never promoted — a too-young or unknown-age new package blocks the dependent.
+6. Optionally apply the resulting safe upgrade set via `sudo pacman -S` / `<aur-helper> -S` when `--apply` is passed. Dry-run is the default.
 
 ### Age Source Strategy
 
@@ -101,7 +102,8 @@ All cargo commands run from the crate directory (`src/`).
     │   │   └── aur_git.rs      # AUR git-history source: bare clones + .SRCINFO version walk
     │   ├── cache.rs            # JSON publication cache (atomic write, TTL for negatives)
     │   ├── http.rs             # HttpClient trait + ureq impl (15s timeout, UA header)
-    │   ├── apply.rs            # Upgrade plan building (name validation) + Executor trait
+    │   ├── apply.rs            # Upgrade plan building (name validation) + Executor trait;
+    │   │                       #   sync DB refresh command (pacman -Sy) and its runner
     │   └── output.rs           # Summary table (ANSI-colored AGE/VERDICT vs. the age gate) + JSON report
     └── tests/
         └── cli.rs              # Binary-level CLI tests (flags, exit codes)
@@ -141,7 +143,8 @@ Tests must pass without pacman, an AUR helper, or network access. Do not add tes
 ## Security Considerations
 
 - `--apply` runs `sudo pacman -S <names>` / `<aur-helper> -S <names>` via `std::process::Command` with argv arrays — no shell. Package names are validated against `[a-z0-9@._+-]` in `apply::is_valid_package_name` before planning. When already running as root, the plan uses plain `pacman -S` (no sudo dependency).
-- Running the tool as root triggers a warning: analysis needs no privileges and elevation happens only inside `--apply`. Root is *not* hard-rejected (containers commonly run as root).
+- The pre-run database refresh (`apply::refresh_command` / `apply::run_refresh`) uses the same elevation rule (`sudo pacman -Sy`, plain `pacman -Sy` as root) and inherits stdin/stderr so sudo can prompt; pacman's stdout is redirected to stderr to keep the report (and JSON) clean.
+- Running the tool as root triggers a warning: analysis needs no privileges and elevation happens only for the refresh and `--apply`. Root is *not* hard-rejected (containers commonly run as root).
 - Dry-run is the default; the real upgrade path requires explicit `--apply`.
 - All network responses and DB records are untrusted and parsed defensively (see Code Style).
 - The cache stores only package names, versions, timestamps, and the publication basis — no user paths or secrets.
