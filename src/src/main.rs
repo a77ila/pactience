@@ -26,11 +26,12 @@ use std::process::ExitCode;
 use clap::Parser;
 
 use crate::cli::Cli;
-use crate::config::{AurHelper, Config};
+use crate::config::{AurHelper, Config, NewDependencyPolicy};
 use crate::db::{DepSpec, LocalDb, SyncDb};
+use crate::deps::RequirementStatus;
 use crate::error::Result;
 use crate::logging::Logger;
-use crate::model::{PackageSource, Publication, UpgradeCandidate};
+use crate::model::{Decision, PackageSource, Publication, UpgradeCandidate, Verdict};
 
 const PACMAN_SYNC_DIR: &str = "/var/lib/pacman/sync";
 const PACMAN_LOCAL_DIR: &str = "/var/lib/pacman/local";
@@ -143,9 +144,10 @@ fn run(cli: &Cli, log: &Logger) -> Result<ExitCode> {
     }
     let config = Config::load(&config_path, cli)?;
     log.debug(format!(
-        "configuration: min_age_days={}, dependency_policy={}, allow_unknown={}, aur_heuristic={}, cache_ttl_secs={}, aur_helper={}, sources={} (from {})",
+        "configuration: min_age_days={}, dependency_policy={}, new_dependencies={}, allow_unknown={}, aur_heuristic={}, cache_ttl_secs={}, aur_helper={}, sources={} (from {})",
         config.min_age_days,
         config.dependency_policy,
+        config.new_dependencies,
         config.allow_unknown,
         config.aur_heuristic,
         config.cache_ttl_secs,
@@ -160,7 +162,8 @@ fn run(cli: &Cli, log: &Logger) -> Result<ExitCode> {
 
     // 1. Discover upgradable packages.
     let runner = discovery::SystemCommandRunner;
-    let (candidates, warnings) = discovery::discover(&runner, config.aur_helper, &config.sources)?;
+    let (mut candidates, warnings) =
+        discovery::discover(&runner, config.aur_helper, &config.sources)?;
     for warning in &warnings {
         log.warn(warning);
     }
@@ -300,15 +303,75 @@ fn run(cli: &Cli, log: &Logger) -> Result<ExitCode> {
         progress.advance(log, &candidate.name);
     }
     progress.finish(log);
+
+    // 5. Dependency requirement analysis. When `new_dependencies` allows it,
+    //    brand-new repo dependencies (not installed, not pending) are pulled
+    //    in as synthetic candidates and gated by the same age policy;
+    //    iterate so their own transitive dependencies are considered too.
+    //    Each pass adds at least one candidate, so the loop terminates.
+    const MAX_NEW_DEP_PASSES: usize = 10;
+    let mut new_packages: HashMap<String, Vec<String>> = HashMap::new();
+    let mut requirements;
+    let mut passes = 0;
+    // In `block` mode the missing packages are still listed in the report
+    // (as blocked rows, with their publication date resolved) so it is
+    // visible *what* an upgrade is waiting for — but they never enter the
+    // candidate set, so they cannot be installed.
+    let mut blocked_new: Vec<(UpgradeCandidate, Vec<String>, Publication)> = Vec::new();
+    loop {
+        let candidate_deps = collect_candidate_deps(&candidates, &syncdb, &aur_infos);
+        requirements = deps::analyze(&candidates, &candidate_deps, &syncdb, &localdb);
+        if config.new_dependencies == NewDependencyPolicy::Block {
+            blocked_new = deps::find_installable_new_deps(&requirements, &syncdb, &candidates)
+                .into_iter()
+                .map(|addition| {
+                    let dependents = requirements
+                        .iter()
+                        .filter(|r| {
+                            r.status == RequirementStatus::Unsatisfied
+                                && r.dep.name == addition.name
+                        })
+                        .map(|r| r.dependent.clone())
+                        .collect();
+                    let p = publication::resolve(&addition, &sources, &mut cache, now, log);
+                    (addition, dependents, p)
+                })
+                .collect();
+            break;
+        }
+        if passes >= MAX_NEW_DEP_PASSES {
+            break;
+        }
+        let additions = deps::find_installable_new_deps(&requirements, &syncdb, &candidates);
+        if additions.is_empty() {
+            break;
+        }
+        passes += 1;
+        for addition in additions {
+            let dependents: Vec<String> = requirements
+                .iter()
+                .filter(|r| {
+                    r.status == RequirementStatus::Unsatisfied && r.dep.name == addition.name
+                })
+                .map(|r| r.dependent.clone())
+                .collect();
+            log.info(format!(
+                "new dependency {} {} pulled in by {}",
+                addition.name,
+                addition.candidate_version,
+                dependents.join(", ")
+            ));
+            let p = publication::resolve(&addition, &sources, &mut cache, now, log);
+            publications.insert(addition.name.clone(), p);
+            new_packages.insert(addition.name.clone(), dependents);
+            candidates.push(addition);
+        }
+    }
     if let Err(e) = cache.save() {
         log.warn(format!("cannot write cache {}: {e}", cache_path.display()));
     } else {
         log.debug(format!("cache saved to {}", cache_path.display()));
     }
-
-    // 5. Dependency requirement analysis.
-    let candidate_deps = collect_candidate_deps(&candidates, &syncdb, &aur_infos);
-    let requirements = deps::analyze(&candidates, &candidate_deps, &syncdb, &localdb);
     log.info(format!(
         "dependency analysis: {} requirement(s)",
         requirements.len()
@@ -320,8 +383,41 @@ fn run(cli: &Cli, log: &Logger) -> Result<ExitCode> {
         ));
     }
 
-    // 6. Policy evaluation.
-    let decisions = policy::evaluate(&candidates, &publications, &requirements, &config, now);
+    // 6. Policy evaluation. Newly injected packages get the same age
+    //    verdicts as everything else; their dependents' requirements are
+    //    now RequiresCandidate edges and promote/block through the normal
+    //    fixpoint.
+    let mut decisions = policy::evaluate(&candidates, &publications, &requirements, &config, now);
+    for decision in &mut decisions {
+        let Some(dependents) = new_packages.get(&decision.candidate.name) else {
+            continue;
+        };
+        decision.reasons.push(format!(
+            "new install: pulled in as a dependency of {}",
+            dependents.join(", ")
+        ));
+        if config.new_dependencies == NewDependencyPolicy::Warn
+            && decision.verdict != Verdict::Block
+        {
+            log.warn(format!(
+                "new package {} {} will be installed (required by {})",
+                decision.candidate.name,
+                decision.candidate.candidate_version,
+                dependents.join(", ")
+            ));
+        }
+    }
+    for (candidate, dependents, publication) in blocked_new {
+        decisions.push(Decision {
+            publication,
+            verdict: Verdict::Block,
+            reasons: vec![format!(
+                "blocked: new dependency of {}; installing new packages is disabled (new_dependencies = \"block\")",
+                dependents.join(", ")
+            )],
+            candidate,
+        });
+    }
     for decision in &decisions {
         log.debug(format!(
             "verdict: {} -> {} ({})",
@@ -350,6 +446,25 @@ fn run(cli: &Cli, log: &Logger) -> Result<ExitCode> {
             );
         }
         println!("{}", output::render_summary(&decisions));
+        // In warn mode the report itself (not just stderr) calls out every
+        // new package that will be installed — the one place the user is
+        // guaranteed to look.
+        if config.new_dependencies == NewDependencyPolicy::Warn {
+            let installing: Vec<&str> = decisions
+                .iter()
+                .filter(|d| {
+                    new_packages.contains_key(&d.candidate.name) && d.verdict != Verdict::Block
+                })
+                .map(|d| d.candidate.name.as_str())
+                .collect();
+            if !installing.is_empty() {
+                println!(
+                    "warning: {} new package(s) will be installed: {}",
+                    installing.len(),
+                    installing.join(", ")
+                );
+            }
+        }
         if let Some(hint) = output::render_hint(&decisions, &config, &config_path) {
             println!("{hint}");
         }

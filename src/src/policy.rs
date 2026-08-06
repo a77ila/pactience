@@ -148,10 +148,16 @@ fn apply_dependency_respecting(decisions: &mut [Decision], requirements: &[Requi
     // `always_block` packages must never be promoted; track which packages
     // may not be promoted. Promotability is lost whenever a candidate is
     // blocked by a dependency rule (its block is then structural, not
-    // age-based), which keeps the fixpoint monotone.
+    // age-based), which keeps the fixpoint monotone. Brand-new packages
+    // (pulled in as new dependencies, never installed) are never promoted
+    // either: they must pass the age gate on their own, otherwise the
+    // dependent is blocked instead.
     let mut no_promote: Vec<bool> = decisions
         .iter()
-        .map(|d| d.reasons.iter().any(|r| r.contains("always_block")))
+        .map(|d| {
+            d.reasons.iter().any(|r| r.contains("always_block"))
+                || d.candidate.installed_version == crate::deps::NEW_PACKAGE_INSTALLED
+        })
         .collect();
 
     loop {
@@ -511,6 +517,96 @@ mod tests {
             &config(),
             NOW,
         );
+        assert_eq!(verdict_of(&d, "app"), Verdict::Block);
+    }
+
+    /// Synthetic candidate for a brand-new dependency (never installed), as
+    /// produced by `deps::find_installable_new_deps`. Once injected, the
+    /// dependent's requirement is a `RequiresCandidate` edge.
+    fn new_candidate(name: &str) -> UpgradeCandidate {
+        UpgradeCandidate {
+            installed_version: crate::deps::NEW_PACKAGE_INSTALLED.to_string(),
+            ..candidate(name)
+        }
+    }
+
+    fn new_dep_req(dependent: &str, dep: &str) -> Requirement {
+        Requirement {
+            dependent: dependent.to_string(),
+            dep: DepSpec::parse(dep).unwrap(),
+            status: RequirementStatus::RequiresCandidate {
+                name: "newlib".to_string(),
+            },
+        }
+    }
+
+    #[test]
+    fn new_dependency_old_enough_allows_dependent() {
+        let d = evaluate(
+            &[candidate("app"), new_candidate("newlib")],
+            &pubs(&[
+                ("app", published_days_ago(10)),
+                ("newlib", published_days_ago(10)),
+            ]),
+            &[new_dep_req("app", "newlib>=2.0")],
+            &config(),
+            NOW,
+        );
+        assert_eq!(verdict_of(&d, "app"), Verdict::Allow);
+        assert_eq!(verdict_of(&d, "newlib"), Verdict::Allow);
+    }
+
+    #[test]
+    fn new_dependency_too_young_blocks_dependent() {
+        let d = evaluate(
+            &[candidate("app"), new_candidate("newlib")],
+            &pubs(&[
+                ("app", published_days_ago(10)),
+                ("newlib", published_days_ago(1)),
+            ]),
+            &[new_dep_req("app", "newlib>=2.0")],
+            &config(),
+            NOW,
+        );
+        // New packages are never promoted: they must pass the age gate on
+        // their own, otherwise the dependent stays blocked.
+        assert_eq!(verdict_of(&d, "newlib"), Verdict::Block);
+        assert_eq!(verdict_of(&d, "app"), Verdict::Block);
+    }
+
+    #[test]
+    fn new_dependency_always_blocked_blocks_dependent() {
+        let mut cfg = config();
+        cfg.always_block = vec!["newlib".to_string()];
+        let d = evaluate(
+            &[candidate("app"), new_candidate("newlib")],
+            &pubs(&[
+                ("app", published_days_ago(10)),
+                ("newlib", published_days_ago(10)),
+            ]),
+            &[new_dep_req("app", "newlib>=2.0")],
+            &cfg,
+            NOW,
+        );
+        assert_eq!(verdict_of(&d, "newlib"), Verdict::Block);
+        assert_eq!(verdict_of(&d, "app"), Verdict::Block);
+    }
+
+    #[test]
+    fn strict_closure_blocks_dependent_of_young_new_dependency() {
+        let mut cfg = config();
+        cfg.dependency_policy = DependencyPolicy::StrictClosure;
+        let d = evaluate(
+            &[candidate("app"), new_candidate("newlib")],
+            &pubs(&[
+                ("app", published_days_ago(10)),
+                ("newlib", published_days_ago(1)),
+            ]),
+            &[new_dep_req("app", "newlib>=2.0")],
+            &cfg,
+            NOW,
+        );
+        assert_eq!(verdict_of(&d, "newlib"), Verdict::Block);
         assert_eq!(verdict_of(&d, "app"), Verdict::Block);
     }
 

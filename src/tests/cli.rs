@@ -24,6 +24,7 @@ fn help_succeeds_and_lists_flags() {
         "--min-age-days",
         "--set-min-age",
         "--dependency-policy",
+        "--new-dependencies",
         "--aur-heuristic",
         "--allow-unknown",
         "--aur-helper",
@@ -71,6 +72,16 @@ fn invalid_dependency_policy_is_rejected() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("dependency-respecting"));
     assert!(stderr.contains("strict-closure"));
+}
+
+#[test]
+fn invalid_new_dependencies_is_rejected() {
+    let out = pactience(&["--new-dependencies", "yolo"]);
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("block"));
+    assert!(stderr.contains("warn"));
+    assert!(stderr.contains("allow"));
 }
 
 #[test]

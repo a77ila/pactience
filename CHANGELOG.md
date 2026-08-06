@@ -3,6 +3,24 @@
 All notable changes to this project are documented here. The format is based
 on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.2.0] - 2026-08-06
+
+### Added
+
+- `new_dependencies` configuration option and `--new-dependencies` flag
+  (`block` default, `warn`, `allow`): when an upgrade requires a brand-new
+  dependency that is not installed yet (e.g. telegram-desktop gaining a
+  cmark-gfm dependency), the dependent is blocked. In `block` mode the
+  missing package is listed as a blocked row (publication date resolved
+  for information only) so the report shows what the upgrade is waiting
+  for. In `warn`/`allow` mode, new dependencies
+  resolvable from the sync DB are pulled into the set as new installs
+  (shown with `-` as the installed version), gated by the same min-age
+  policy — but never promoted: a new package that is too young or of
+  unknown age blocks the dependent. `warn` additionally prints a warning
+  for each new package to be installed (on stderr and in a line after the
+  report summary). AUR-only new dependencies still block the dependent.
+
 ## [0.1.3] - 2026-07-23
 
 ### Added
@@ -73,6 +91,7 @@ on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `--apply`, table and JSON output, first-run configuration template, and
   AUR publication via the release workflow.
 
+[0.2.0]: https://github.com/a77ila/pactience/compare/v0.1.3...v0.2.0
 [0.1.3]: https://github.com/a77ila/pactience/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/a77ila/pactience/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/a77ila/pactience/compare/v0.1.0...v0.1.1

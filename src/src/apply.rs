@@ -248,6 +248,22 @@ mod tests {
         assert!(plan(&decisions, false, AurHelper::Paru).unwrap().is_empty());
     }
 
+    #[test]
+    fn plan_includes_never_installed_repo_package() {
+        // Brand-new dependencies (installed "-") are installed by the same
+        // `pacman -S` command that performs upgrades.
+        let mut d = decision("cmark-gfm", PackageSource::Repo, Verdict::Allow);
+        d.candidate.installed_version = crate::deps::NEW_PACKAGE_INSTALLED.to_string();
+        let cmds = plan(&[d], false, AurHelper::Paru).unwrap();
+        assert_eq!(
+            cmds,
+            vec![PlannedCommand {
+                program: "sudo".into(),
+                args: vec!["pacman".into(), "-S".into(), "cmark-gfm".into()],
+            }]
+        );
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn effective_uid_is_readable() {

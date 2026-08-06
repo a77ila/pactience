@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use clap::Parser;
 
-use crate::config::{AurHelper, DependencyPolicy};
+use crate::config::{AurHelper, DependencyPolicy, NewDependencyPolicy};
 use crate::model::PackageSource;
 
 /// Enforce a minimum package age before upgrading Arch Linux packages.
@@ -39,6 +39,13 @@ pub struct Cli {
     /// How to handle upgrades that require younger dependencies.
     #[arg(long, value_enum)]
     pub dependency_policy: Option<DependencyPolicy>,
+
+    /// How to handle brand-new (not yet installed) dependencies of upgrades:
+    /// `block` (default) blocks such upgrades, `warn`/`allow` install new
+    /// repo dependencies that pass the same min-age policy (with/without a
+    /// warning).
+    #[arg(long, value_enum)]
+    pub new_dependencies: Option<NewDependencyPolicy>,
 
     /// Use the AUR `LastModified` field as a heuristic publication time for
     /// AUR packages. Off by default because the AUR exposes no per-version
