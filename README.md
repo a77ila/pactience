@@ -18,7 +18,9 @@ pass `--apply`.
 
 ## How it decides
 
-1. **Discovery** — parses `pacman -Qu` (repo packages) and the configured AUR
+1. **Discovery** — refreshes the sync databases first (`pacman -Sy`, via sudo
+   unless running as root; disable with `refresh = false` / `--no-refresh`),
+   then parses `pacman -Qu` (repo packages) and the configured AUR
    helper's `-Qua` output (paru or yay; AUR).
 2. **Publication dates** — per candidate version, resolved and cached:
    - *repo packages*: the [Arch Linux Archive](https://archive.archlinux.org)
@@ -98,7 +100,7 @@ hint: 1 package(s) blocked; whitelist trusted packages via always_allow in ~/.co
 ```
 
 Notable flags: `--dependency-policy`, `--new-dependencies`, `--aur-heuristic`, `--no-aur-git`,
-`--aur-helper`, `--sources`, `--allow-unknown`, `--set-min-age`, `--config`,
+`--no-refresh`, `--aur-helper`, `--sources`, `--allow-unknown`, `--set-min-age`, `--config`,
 `-q/--quiet`, `--summary-only`, `--clear-cache`. See `--help`.
 
 ## Configuration
@@ -121,6 +123,7 @@ fully commented template plus your choices is written to
 # allow_unknown = false               # allow packages with unknown age
 # aur_heuristic = false               # gate AUR by RPC LastModified
 # aur_git = true                      # accurate AUR dates from git history
+# refresh = true                      # pacman -Sy before each run
 # aur_helper = "paru"                 # "paru", "yay", or "none"
 # sources = ["repo", "aur"]       # or ["repo"] only, or ["aur"] only
 ```

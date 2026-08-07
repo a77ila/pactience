@@ -49,14 +49,15 @@ fn main() -> ExitCode {
 }
 
 fn run(cli: &Cli, log: &Logger) -> Result<ExitCode> {
-    // Analysis needs no privileges; only `--apply` elevates (via sudo, or
-    // directly when already root). Running the whole tool as root mostly
-    // means cache/config state lands in /root instead of the user's home.
+    // Analysis itself needs no privileges; only the sync database refresh
+    // and `--apply` elevate (via sudo, or directly when already root).
+    // Running the whole tool as root mostly means cache/config state lands
+    // in /root instead of the user's home.
     let as_root = apply::effective_uid() == Some(0);
     if as_root {
         log.warn(
-            "running as root is discouraged: pactience needs no privileges for analysis \
-             and elevates via sudo only when --apply is used",
+            "running as root is discouraged: pactience elevates via sudo only for the \
+             database refresh and --apply; analysis itself needs no privileges",
         );
     }
 
@@ -144,7 +145,7 @@ fn run(cli: &Cli, log: &Logger) -> Result<ExitCode> {
     }
     let config = Config::load(&config_path, cli)?;
     log.debug(format!(
-        "configuration: min_age_days={}, dependency_policy={}, new_dependencies={}, allow_unknown={}, aur_heuristic={}, cache_ttl_secs={}, aur_helper={}, sources={} (from {})",
+        "configuration: min_age_days={}, dependency_policy={}, new_dependencies={}, allow_unknown={}, aur_heuristic={}, cache_ttl_secs={}, aur_helper={}, sources={}, refresh={} (from {})",
         config.min_age_days,
         config.dependency_policy,
         config.new_dependencies,
@@ -153,6 +154,7 @@ fn run(cli: &Cli, log: &Logger) -> Result<ExitCode> {
         config.cache_ttl_secs,
         config.aur_helper,
         config::format_sources(&config.sources),
+        config.refresh,
         config_path.display()
     ));
     let now = std::time::SystemTime::now()
@@ -160,7 +162,23 @@ fn run(cli: &Cli, log: &Logger) -> Result<ExitCode> {
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
 
-    // 1. Discover upgradable packages.
+    // 1. Refresh the sync databases so discovery and apply see the current
+    //    repository state: stale databases both hide upgrades and make
+    //    pacman downloads fail with 404s. AUR-only runs never touch pacman
+    //    databases, and a failed refresh degrades to a warning (the run
+    //    continues with possibly stale data).
+    if config.refresh && config.sources.contains(&PackageSource::Repo) {
+        let command = apply::refresh_command(as_root);
+        log.info(format!("refreshing package databases: {command}"));
+        if let Err(e) = apply::run_refresh(&command) {
+            log.warn(format!(
+                "cannot refresh package databases: {e}; \
+                 continuing with possibly stale repository data"
+            ));
+        }
+    }
+
+    // 2. Discover upgradable packages.
     let runner = discovery::SystemCommandRunner;
     let (mut candidates, warnings) =
         discovery::discover(&runner, config.aur_helper, &config.sources)?;
@@ -194,7 +212,7 @@ fn run(cli: &Cli, log: &Logger) -> Result<ExitCode> {
         return Ok(ExitCode::SUCCESS);
     }
 
-    // 2. Load pacman databases (best-effort: needed for fallback timestamps
+    // 3. Load pacman databases (best-effort: needed for fallback timestamps
     //    and dependency metadata, but a broken DB must not stop the run).
     let syncdb = SyncDb::load(Path::new(PACMAN_SYNC_DIR)).unwrap_or_else(|e| {
         log.warn(format!(
@@ -214,7 +232,7 @@ fn run(cli: &Cli, log: &Logger) -> Result<ExitCode> {
         localdb.installed.len()
     ));
 
-    // 3. Pre-fetch AUR metadata (publication heuristic + dependency info).
+    // 4. Pre-fetch AUR metadata (publication heuristic + dependency info).
     let http = http::UreqClient::new();
     let aur_names: Vec<String> = candidates
         .iter()
@@ -244,7 +262,7 @@ fn run(cli: &Cli, log: &Logger) -> Result<ExitCode> {
         ));
     }
 
-    // 4. Resolve publication timestamps (cache -> Archive -> repo builddate).
+    // 5. Resolve publication timestamps (cache -> Archive -> repo builddate).
     let cache_path = config::default_cache_path();
     let (mut cache, cache_warning) =
         cache::PublicationCache::load(&cache_path, config.cache_ttl_secs);
@@ -304,7 +322,7 @@ fn run(cli: &Cli, log: &Logger) -> Result<ExitCode> {
     }
     progress.finish(log);
 
-    // 5. Dependency requirement analysis. When `new_dependencies` allows it,
+    // 6. Dependency requirement analysis. When `new_dependencies` allows it,
     //    brand-new repo dependencies (not installed, not pending) are pulled
     //    in as synthetic candidates and gated by the same age policy;
     //    iterate so their own transitive dependencies are considered too.
@@ -383,7 +401,7 @@ fn run(cli: &Cli, log: &Logger) -> Result<ExitCode> {
         ));
     }
 
-    // 6. Policy evaluation. Newly injected packages get the same age
+    // 7. Policy evaluation. Newly injected packages get the same age
     //    verdicts as everything else; their dependents' requirements are
     //    now RequiresCandidate edges and promote/block through the normal
     //    fixpoint.
@@ -427,7 +445,7 @@ fn run(cli: &Cli, log: &Logger) -> Result<ExitCode> {
         ));
     }
 
-    // 7. Output. Diagnostics stay on stderr so JSON stdout remains clean.
+    // 8. Output. Diagnostics stay on stderr so JSON stdout remains clean.
     let colorize = match cli.color {
         cli::ColorChoice::Always => true,
         cli::ColorChoice::Never => false,
@@ -470,7 +488,7 @@ fn run(cli: &Cli, log: &Logger) -> Result<ExitCode> {
         }
     }
 
-    // 8. Optional apply. Dry-run is the default and requires explicit opt-in.
+    // 9. Optional apply. Dry-run is the default and requires explicit opt-in.
     let commands = apply::plan(&decisions, as_root, config.aur_helper)?;
     if cli.apply {
         if commands.is_empty() {

@@ -64,6 +64,12 @@ pub struct Cli {
     #[arg(long)]
     pub no_aur_git: bool,
 
+    /// Do not refresh the pacman sync databases (`pacman -Sy`) before the
+    /// run. Refreshing is on by default because stale databases both hide
+    /// upgrades and cause 404s at download time.
+    #[arg(long)]
+    pub no_refresh: bool,
+
     /// AUR helper used to discover and apply AUR upgrades; `none` disables
     /// AUR handling entirely.
     #[arg(long, value_enum, value_name = "HELPER")]

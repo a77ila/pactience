@@ -122,6 +122,8 @@ pub struct Config {
     pub aur_heuristic: bool,
     /// Look up accurate per-version dates from AUR git history (default on).
     pub aur_git: bool,
+    /// Refresh the pacman sync databases before each run (default on).
+    pub refresh: bool,
     /// AUR helper used for discovery and upgrades.
     pub aur_helper: AurHelper,
     /// Which package sources are managed (each one listed).
@@ -142,6 +144,7 @@ struct FileConfig {
     allow_unknown: Option<bool>,
     aur_heuristic: Option<bool>,
     aur_git: Option<bool>,
+    refresh: Option<bool>,
     aur_helper: Option<AurHelper>,
     sources: Option<Vec<PackageSource>>,
 }
@@ -158,6 +161,7 @@ impl Default for Config {
             allow_unknown: false,
             aur_heuristic: false,
             aur_git: true,
+            refresh: true,
             aur_helper: AurHelper::Paru,
             sources: vec![PackageSource::Repo, PackageSource::Aur],
         }
@@ -211,6 +215,9 @@ impl Config {
         if let Some(v) = file.aur_git {
             self.aur_git = v;
         }
+        if let Some(v) = file.refresh {
+            self.refresh = v;
+        }
         if let Some(v) = file.aur_helper {
             self.aur_helper = v;
         }
@@ -239,6 +246,9 @@ impl Config {
         }
         if cli.no_aur_git {
             self.aur_git = false;
+        }
+        if cli.no_refresh {
+            self.refresh = false;
         }
         if let Some(v) = cli.aur_helper {
             self.aur_helper = v;
@@ -331,6 +341,12 @@ pub const CONFIG_TEMPLATE: &str = r#"# pactience configuration
 # (one small bare clone per package, cached and only fetched afterwards).
 # Default true.
 # aur_git = true
+
+# Refresh the pacman sync databases (pacman -Sy, via sudo unless running as
+# root) before each run, so discovery and upgrades see the current repository
+# state. Stale databases both hide upgrades and make downloads fail with
+# 404s. Skipped when only AUR sources are managed. Default true.
+# refresh = true
 
 # AUR helper used to discover and apply AUR upgrades: "paru" (default),
 # "yay", or "none" to disable AUR handling entirely.
@@ -722,6 +738,7 @@ aur_heuristic = true
             "allow_unknown",
             "aur_heuristic",
             "aur_git",
+            "refresh",
             "aur_helper",
             "sources",
         ] {
@@ -747,6 +764,26 @@ aur_heuristic = true
             std::fs::read_to_string(&path).unwrap(),
             "min_age_days = 9\n"
         );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn refresh_from_file_cli_and_default() {
+        assert!(Config::default().refresh);
+
+        let dir = std::env::temp_dir().join(format!("aag-test-refresh-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        std::fs::write(&path, "refresh = false\n").unwrap();
+        let config = Config::load(&path, &cli(&[])).unwrap();
+        assert!(!config.refresh);
+        // The file can also re-enable an explicit default.
+        std::fs::write(&path, "refresh = true\n").unwrap();
+        let config = Config::load(&path, &cli(&[])).unwrap();
+        assert!(config.refresh);
+        // CLI wins over the file (there is no enabling flag, only --no-refresh).
+        let config = Config::load(&path, &cli(&["--no-refresh"])).unwrap();
+        assert!(!config.refresh);
         std::fs::remove_dir_all(&dir).ok();
     }
 
