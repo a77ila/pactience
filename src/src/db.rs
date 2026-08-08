@@ -247,6 +247,7 @@ pub fn parse_desc(content: &str) -> RepoPackageMeta {
 pub struct InstalledPackage {
     pub version: String,
     pub provides: Vec<Provide>,
+    pub depends: Vec<DepSpec>,
 }
 
 /// Installed packages from the local pacman database, with an index over
@@ -277,6 +278,7 @@ impl LocalDb {
                     InstalledPackage {
                         version: pkg.version,
                         provides: pkg.provides,
+                        depends: pkg.depends,
                     },
                 );
             }

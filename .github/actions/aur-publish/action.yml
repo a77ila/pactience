@@ -1,0 +1,86 @@
+name: Publish to the AUR
+description: >-
+  Clone an AUR package repo, update PKGBUILD and .SRCINFO for a new
+  version, then commit and push. Expects the AUR SSH key to be installed
+  already (see the "Set up AUR SSH key" step in the caller workflows)
+  and makepkg/curl/git to be available (Arch container).
+inputs:
+  package:
+    description: AUR package name (e.g. pactience or pactience-bin)
+    required: true
+  kind:
+    description: '"source" builds from the tag tarball, "bin" repacks release assets'
+    required: true
+  version:
+    description: Version to publish; a leading "v" is stripped
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Compute checksums
+      shell: sh
+      run: |
+        version="${{ inputs.version }}"
+        version="${version#v}"
+        if [ "${{ inputs.kind }}" = source ]; then
+          url="https://github.com/${{ github.repository }}/archive/refs/tags/v${version}.tar.gz"
+          curl -fL --retry 5 --retry-delay 10 --retry-all-errors -o source.tar.gz "$url"
+          echo "SHA256_SOURCE=$(sha256sum source.tar.gz | cut -d' ' -f1)" >> "$GITHUB_ENV"
+        else
+          base="https://github.com/${{ github.repository }}/releases/download/v${version}"
+          x86_asset="pactience-${version}-x86_64-unknown-linux-gnu.tar.gz"
+          arm_asset="pactience-${version}-aarch64-unknown-linux-gnu.tar.gz"
+          curl -fL --retry 5 --retry-delay 10 --retry-all-errors -o "$x86_asset" "$base/$x86_asset"
+          curl -fL --retry 5 --retry-delay 10 --retry-all-errors -o "$arm_asset" "$base/$arm_asset"
+          echo "SHA256_X86_64=$(sha256sum "$x86_asset" | cut -d' ' -f1)" >> "$GITHUB_ENV"
+          echo "SHA256_AARCH64=$(sha256sum "$arm_asset" | cut -d' ' -f1)" >> "$GITHUB_ENV"
+        fi
+
+    - name: Update and push AUR package
+      shell: sh
+      run: |
+        version="${{ inputs.version }}"
+        version="${version#v}"
+        pkg="${{ inputs.package }}"
+        # The AUR goes down for maintenance occasionally; retry the clone
+        # instead of failing immediately. Multi-day outages are covered by
+        # the scheduled aur-sync workflow, not by this loop.
+        # Cloning a not-yet-existing package yields an empty repository;
+        # the AUR creates it on first push.
+        for i in 1 2 3 4 5; do
+          git clone "ssh://aur@aur.archlinux.org/${pkg}.git" "$pkg" && break
+          rm -rf "$pkg"
+          [ "$i" -lt 5 ] && sleep 60
+        done
+        if [ ! -d "$pkg" ]; then
+          echo "::error::Failed to clone ${pkg} from the AUR after retries"
+          exit 1
+        fi
+        cd "$pkg"
+        if [ "${{ inputs.kind }}" = source ]; then
+          sed -e "s/^pkgver=.*/pkgver=${version}/" \
+              -e "s/^sha256sums=.*/sha256sums=('${SHA256_SOURCE}')/" \
+              "${{ github.workspace }}/packaging/aur/PKGBUILD" > PKGBUILD
+        else
+          sed -e "s/^pkgver=.*/pkgver=${version}/" \
+              -e "s/^sha256sums_x86_64=.*/sha256sums_x86_64=('${SHA256_X86_64}')/" \
+              -e "s/^sha256sums_aarch64=.*/sha256sums_aarch64=('${SHA256_AARCH64}')/" \
+              "${{ github.workspace }}/packaging/aur-bin/PKGBUILD" > PKGBUILD
+        fi
+        # makepkg refuses to run as root; regenerate .SRCINFO as a user.
+        # makepkg requires writable BUILDDIR/PKGDEST/... even for
+        # --printsrcinfo, so point them at /tmp. Do NOT chown the repo to
+        # builder instead: that trips git's ownership check ("fatal: not
+        # in a git directory") for the git commands below.
+        useradd -m builder
+        runuser -u builder -- env BUILDDIR=/tmp PKGDEST=/tmp SRCDEST=/tmp \
+            SRCPKGDEST=/tmp LOGDEST=/tmp makepkg --printsrcinfo > .SRCINFO
+        git config user.name "github-actions[bot]"
+        git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+        git add PKGBUILD .SRCINFO
+        if git diff --cached --quiet; then
+          echo "AUR package already up to date"
+        else
+          git commit -m "Update to ${version}"
+          git push origin master
+        fi
