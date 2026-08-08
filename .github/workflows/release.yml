@@ -99,12 +99,6 @@ jobs:
       - name: Trust workspace
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
-      - name: Compute source tarball checksum
-        run: |
-          url="https://github.com/a77ila/pactience/archive/refs/tags/${GITHUB_REF_NAME}.tar.gz"
-          curl -fL --retry 5 --retry-delay 10 --retry-all-errors -o source.tar.gz "$url"
-          echo "SOURCE_SHA256=$(sha256sum source.tar.gz | cut -d' ' -f1)" >> "$GITHUB_ENV"
-
       - name: Set up AUR SSH key
         env:
           AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
@@ -119,31 +113,12 @@ jobs:
           ssh-keyscan aur.archlinux.org >> "$ssh_dir/known_hosts"
           grep -q aur.archlinux.org "$ssh_dir/known_hosts"
 
-      - name: Update and push AUR package
-        run: |
-          version="${GITHUB_REF_NAME#v}"
-          git clone "ssh://aur@aur.archlinux.org/${AUR_PACKAGE}.git" aur
-          cd aur
-          sed -e "s/^pkgver=.*/pkgver=${version}/" \
-              -e "s/^sha256sums=.*/sha256sums=('${SOURCE_SHA256}')/" \
-              "$GITHUB_WORKSPACE/packaging/aur/PKGBUILD" > PKGBUILD
-          # makepkg refuses to run as root; regenerate .SRCINFO as a user.
-          # makepkg requires writable BUILDDIR/PKGDEST/... even for
-          # --printsrcinfo, so point them at /tmp. Do NOT chown the repo to
-          # builder instead: that trips git's ownership check ("fatal: not
-          # in a git directory") for the git commands below.
-          useradd -m builder
-          runuser -u builder -- env BUILDDIR=/tmp PKGDEST=/tmp SRCDEST=/tmp \
-              SRCPKGDEST=/tmp LOGDEST=/tmp makepkg --printsrcinfo > .SRCINFO
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add PKGBUILD .SRCINFO
-          if git diff --cached --quiet; then
-            echo "AUR package already up to date"
-          else
-            git commit -m "Update to ${version}"
-            git push origin master
-          fi
+      - name: Publish to the AUR
+        uses: ./.github/actions/aur-publish
+        with:
+          package: ${{ env.AUR_PACKAGE }}
+          kind: source
+          version: ${{ github.ref_name }}
 
   aur-bin:
     name: Publish pactience-bin to the AUR
@@ -160,17 +135,6 @@ jobs:
       - name: Trust workspace
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
-      - name: Download release assets and compute checksums
-        run: |
-          version="${GITHUB_REF_NAME#v}"
-          base="https://github.com/a77ila/pactience/releases/download/${GITHUB_REF_NAME}"
-          x86_asset="pactience-${version}-x86_64-unknown-linux-gnu.tar.gz"
-          arm_asset="pactience-${version}-aarch64-unknown-linux-gnu.tar.gz"
-          curl -fL --retry 5 --retry-delay 10 --retry-all-errors -o "$x86_asset" "$base/$x86_asset"
-          curl -fL --retry 5 --retry-delay 10 --retry-all-errors -o "$arm_asset" "$base/$arm_asset"
-          echo "SHA256_X86_64=$(sha256sum "$x86_asset" | cut -d' ' -f1)" >> "$GITHUB_ENV"
-          echo "SHA256_AARCH64=$(sha256sum "$arm_asset" | cut -d' ' -f1)" >> "$GITHUB_ENV"
-
       - name: Set up AUR SSH key
         env:
           AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
@@ -185,32 +149,9 @@ jobs:
           ssh-keyscan aur.archlinux.org >> "$ssh_dir/known_hosts"
           grep -q aur.archlinux.org "$ssh_dir/known_hosts"
 
-      - name: Update and push AUR package
-        run: |
-          version="${GITHUB_REF_NAME#v}"
-          # The AUR creates the pactience-bin repo on first push, just like
-          # the source package: cloning a not-yet-existing package yields an
-          # empty repository.
-          git clone "ssh://aur@aur.archlinux.org/${AUR_PACKAGE}-bin.git" aur-bin
-          cd aur-bin
-          sed -e "s/^pkgver=.*/pkgver=${version}/" \
-              -e "s/^sha256sums_x86_64=.*/sha256sums_x86_64=('${SHA256_X86_64}')/" \
-              -e "s/^sha256sums_aarch64=.*/sha256sums_aarch64=('${SHA256_AARCH64}')/" \
-              "$GITHUB_WORKSPACE/packaging/aur-bin/PKGBUILD" > PKGBUILD
-          # makepkg refuses to run as root; regenerate .SRCINFO as a user.
-          # makepkg requires writable BUILDDIR/PKGDEST/... even for
-          # --printsrcinfo, so point them at /tmp. Do NOT chown the repo to
-          # builder instead: that trips git's ownership check ("fatal: not
-          # in a git directory") for the git commands below.
-          useradd -m builder
-          runuser -u builder -- env BUILDDIR=/tmp PKGDEST=/tmp SRCDEST=/tmp \
-              SRCPKGDEST=/tmp LOGDEST=/tmp makepkg --printsrcinfo > .SRCINFO
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add PKGBUILD .SRCINFO
-          if git diff --cached --quiet; then
-            echo "AUR package already up to date"
-          else
-            git commit -m "Update to ${version}"
-            git push origin master
-          fi
+      - name: Publish to the AUR
+        uses: ./.github/actions/aur-publish
+        with:
+          package: ${{ env.AUR_PACKAGE }}-bin
+          kind: bin
+          version: ${{ github.ref_name }}

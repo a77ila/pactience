@@ -3,6 +3,43 @@
 All notable changes to this project are documented here. The format is based
 on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.2.2] - 2026-08-08
+
+### Added
+
+- AUR publish resilience: the AUR push in `release.yml` was extracted into
+  a reusable composite action (`.github/actions/aur-publish`) that retries
+  the AUR git clone, and a new scheduled `aur-sync` workflow (every 6
+  hours, plus manual dispatch) re-checks whether the AUR packages lag the
+  latest GitHub Release and republishes whatever is missing. Previously an
+  AUR git interface outage (maintenance, DDoS mitigation — these can last
+  for days) failed the release workflow and left the AUR packages stale
+  until someone re-ran it manually; the sync workflow probes the interface
+  first and skips quietly while the AUR is down.
+
+### Fixed
+
+- A pending upgrade whose candidate version drops a versioned soname
+  provide (e.g. ffmpeg 9 dropping `libavcodec.so=62-64`) is now blocked
+  whenever another candidate still requires that capability — previously
+  the edge was classified as satisfied by the installed provider, so
+  pactience produced an upgrade set pacman then refused (`breaks
+  dependency ... required by <held-back package>`). The block cascades to
+  anything requiring the provider's candidate. Repo candidates whose
+  provides are unknown (AUR) are unaffected, and a second candidate still
+  providing the capability (a compat package) takes over instead.
+- The same refusal happened when the held-back dependent was *already
+  rebuilt* against the new soname (its candidate dep then points at the
+  provider's candidate, so the candidate-side check above does not apply):
+  pacman checks the *installed* dependent's declarations, which pactience
+  never read. A new reverse pass (`deps::find_installed_breaks`) now checks
+  every installed package's installed dependencies against capabilities
+  dropped by pending upgrades: a pending dependent couples with the
+  provider and is promoted alongside it (its candidate comes from the same
+  consistent repo), while a non-pending dependent (foreign/AUR package, or
+  not in the upgrade set) blocks the provider outright, since it can never
+  join the transaction.
+
 ## [0.2.1] - 2026-08-06
 
 ### Added

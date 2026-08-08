@@ -1,0 +1,94 @@
+name: AUR sync
+
+# The AUR publish in release.yml fails when the AUR git interface is down
+# (maintenance, DDoS mitigation), and such outages can last for days.
+# This workflow re-checks every 6 hours whether the AUR packages lag the
+# latest GitHub Release and republishes whatever is missing once the AUR
+# is back. Can also be triggered manually via workflow_dispatch.
+on:
+  schedule:
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  AUR_PACKAGE: pactience
+
+jobs:
+  sync:
+    name: Sync AUR packages with the latest release
+    runs-on: ubuntu-latest
+    # makepkg only runs on Arch; nodejs is needed by actions/checkout.
+    container: archlinux:base-devel
+    steps:
+      - name: Install tooling
+        run: pacman -Sy --noconfirm --needed nodejs git openssh jq
+
+      - uses: actions/checkout@v7
+
+      - name: Trust workspace
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Compare latest release with AUR versions
+        id: check
+        run: |
+          tag="$(curl -sf "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/latest" | jq -r .tag_name)"
+          version="${tag#v}"
+          echo "Latest release: $tag"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          # AUR RPC answers "pkgver-pkgrel"; pkgver never contains a dash.
+          # A query failure yields an empty value, i.e. "needs sync" — the
+          # probe below decides whether publishing is possible at all.
+          aur_version() {
+            curl -sf "https://aur.archlinux.org/rpc/v5/info/$1" | jq -r '.results[0].Version // empty' || true
+          }
+          src_ver="$(aur_version "$AUR_PACKAGE")"; src_ver="${src_ver%-*}"
+          bin_ver="$(aur_version "${AUR_PACKAGE}-bin")"; bin_ver="${bin_ver%-*}"
+          echo "${AUR_PACKAGE} on AUR: ${src_ver:-<not found>}"
+          echo "${AUR_PACKAGE}-bin on AUR: ${bin_ver:-<not found>}"
+          [ "$src_ver" = "$version" ] || echo "need_source=true" >> "$GITHUB_OUTPUT"
+          [ "$bin_ver" = "$version" ] || echo "need_bin=true" >> "$GITHUB_OUTPUT"
+
+      - name: Set up AUR SSH key
+        env:
+          AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+        run: |
+          # ssh resolves ~/.ssh via the passwd database, not $HOME (which
+          # Actions points at /github/home inside container jobs), so use
+          # the real home directory of the current user.
+          ssh_dir="$(getent passwd "$(id -u)" | cut -d: -f6)/.ssh"
+          install -dm700 "$ssh_dir"
+          printf '%s\n' "$AUR_SSH_PRIVATE_KEY" > "$ssh_dir/id_ed25519"
+          chmod 600 "$ssh_dir/id_ed25519"
+          ssh-keyscan aur.archlinux.org >> "$ssh_dir/known_hosts"
+          grep -q aur.archlinux.org "$ssh_dir/known_hosts"
+
+      - name: Probe the AUR git interface
+        id: probe
+        # During AUR maintenance the banner makes ls-remote fail; skip the
+        # publish steps instead of failing the scheduled run every 6 hours.
+        run: |
+          if git ls-remote "ssh://aur@aur.archlinux.org/${AUR_PACKAGE}.git" >/dev/null 2>&1; then
+            echo "up=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::AUR git interface unavailable (maintenance?) - skipping sync"
+            echo "up=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish pactience
+        if: steps.probe.outputs.up == 'true' && steps.check.outputs.need_source == 'true'
+        uses: ./.github/actions/aur-publish
+        with:
+          package: ${{ env.AUR_PACKAGE }}
+          kind: source
+          version: ${{ steps.check.outputs.version }}
+
+      - name: Publish pactience-bin
+        if: steps.probe.outputs.up == 'true' && steps.check.outputs.need_bin == 'true'
+        uses: ./.github/actions/aur-publish
+        with:
+          package: ${{ env.AUR_PACKAGE }}-bin
+          kind: bin
+          version: ${{ steps.check.outputs.version }}

@@ -390,6 +390,17 @@ fn run(cli: &Cli, log: &Logger) -> Result<ExitCode> {
     } else {
         log.debug(format!("cache saved to {}", cache_path.display()));
     }
+    // Reverse dependency safety: pacman also refuses the transaction when an
+    // installed package that stays behind loses a capability its installed
+    // version requires (e.g. a soname dropped by a provider's candidate), so
+    // the upgrade set must respect the *installed* dependency declarations
+    // too — not just those of the candidate versions analyzed above.
+    requirements.extend(deps::find_installed_breaks(
+        &candidates,
+        &requirements,
+        &syncdb,
+        &localdb,
+    ));
     log.info(format!(
         "dependency analysis: {} requirement(s)",
         requirements.len()

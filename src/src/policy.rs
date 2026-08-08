@@ -16,6 +16,10 @@
 //! dependent (Arch rarely versions deps, so a soname bump is invisible in
 //! the metadata). The dependent is promoted, or — when it cannot be
 //! promoted, or under `strict-closure` — the dependency is blocked.
+//! A dependency satisfied only through an installed provider whose candidate
+//! version drops the capability (a versioned soname provide) blocks the
+//! provider outright: the dependent still requires the dropped capability
+//! whether it is held back or upgraded along.
 
 use std::collections::HashMap;
 
@@ -168,6 +172,27 @@ fn apply_dependency_respecting(decisions: &mut [Decision], requirements: &[Requi
             };
             match &req.status {
                 RequirementStatus::SatisfiedByInstalled { .. } => {}
+                RequirementStatus::BreaksInstalled { name } => {
+                    // The provider's candidate drops a capability the
+                    // dependent still requires (declared by its candidate
+                    // version), so upgrading the provider breaks the
+                    // dependent whether it is held back or upgraded along:
+                    // the provider must never enter the upgrade set.
+                    let Some(b) = index_of(decisions, name) else {
+                        continue;
+                    };
+                    if !is_upgraded(decisions[b].verdict) {
+                        continue;
+                    }
+                    decisions[b].verdict = Verdict::Block;
+                    no_promote[b] = true;
+                    decisions[b].reasons.push(format!(
+                        "blocked: candidate version no longer provides {}, still required by {}",
+                        format_dep(&req.dep),
+                        req.dependent
+                    ));
+                    changed = true;
+                }
                 RequirementStatus::CoupledWithCandidate { name } => {
                     let Some(b) = index_of(decisions, name) else {
                         continue;
@@ -268,12 +293,31 @@ fn apply_strict_closure(decisions: &mut [Decision], requirements: &[Requirement]
                 }
                 continue;
             }
+            // A dropped capability constrains the provider regardless of the
+            // dependent's verdict: the dependent's candidate still declares
+            // the requirement, so the provider can never move.
+            if let RequirementStatus::BreaksInstalled { name } = &req.status {
+                let Some(b) = index_of(decisions, name) else {
+                    continue;
+                };
+                if is_upgraded(decisions[b].verdict) {
+                    decisions[b].verdict = Verdict::Block;
+                    decisions[b].reasons.push(format!(
+                        "blocked: candidate version no longer provides {}, still required by {}",
+                        format_dep(&req.dep),
+                        req.dependent
+                    ));
+                    changed = true;
+                }
+                continue;
+            }
             if !is_upgraded(decisions[a].verdict) {
                 continue;
             }
             let block_reason = match &req.status {
                 RequirementStatus::SatisfiedByInstalled { .. }
-                | RequirementStatus::CoupledWithCandidate { .. } => None,
+                | RequirementStatus::CoupledWithCandidate { .. }
+                | RequirementStatus::BreaksInstalled { .. } => None,
                 RequirementStatus::Unsatisfied => Some(format!(
                     "blocked: candidate version requires {}, which no installed package or allowed candidate provides",
                     format_dep(&req.dep)
@@ -832,5 +876,249 @@ mod tests {
         );
         assert_eq!(verdict_of(&d, "app"), Verdict::Allow);
         assert_eq!(verdict_of(&d, "lib"), Verdict::Allow);
+    }
+
+    fn breaks_installed(dependent: &str, dep: &str, provider: &str) -> Requirement {
+        Requirement {
+            dependent: dependent.to_string(),
+            dep: DepSpec::parse(dep).unwrap(),
+            status: RequirementStatus::BreaksInstalled {
+                name: provider.to_string(),
+            },
+        }
+    }
+
+    #[test]
+    fn dropped_capability_blocks_allowed_provider() {
+        // Soname bump: the provider is old enough, but its candidate drops
+        // the capability the held-back dependent still requires.
+        let d = evaluate(
+            &[candidate("recorder"), candidate("avlib")],
+            &pubs(&[
+                ("recorder", published_days_ago(1)),
+                ("avlib", published_days_ago(10)),
+            ]),
+            &[breaks_installed("recorder", "libavcodec.so=62-64", "avlib")],
+            &config(),
+            NOW,
+        );
+        assert_eq!(verdict_of(&d, "recorder"), Verdict::Block);
+        assert_eq!(verdict_of(&d, "avlib"), Verdict::Block);
+        assert!(
+            d.iter()
+                .find(|x| x.candidate.name == "avlib")
+                .unwrap()
+                .reasons
+                .iter()
+                .any(|r| r.contains("no longer provides libavcodec.so=62-64"))
+        );
+    }
+
+    #[test]
+    fn dropped_capability_blocks_provider_even_when_dependent_allowed() {
+        // The dependent's candidate still declares the dropped capability,
+        // so upgrading the provider breaks the dependent either way.
+        let d = evaluate(
+            &[candidate("recorder"), candidate("avlib")],
+            &pubs(&[
+                ("recorder", published_days_ago(10)),
+                ("avlib", published_days_ago(10)),
+            ]),
+            &[breaks_installed("recorder", "libavcodec.so=62-64", "avlib")],
+            &config(),
+            NOW,
+        );
+        assert_eq!(verdict_of(&d, "recorder"), Verdict::Allow);
+        assert_eq!(verdict_of(&d, "avlib"), Verdict::Block);
+    }
+
+    #[test]
+    fn dropped_capability_block_cascades_to_requirers() {
+        // app requires the provider's candidate; the provider is blocked by
+        // the dropped capability, so app must be held back too.
+        let reqs = vec![
+            Requirement {
+                dependent: "app".to_string(),
+                dep: DepSpec::parse("libavcodec.so=63-64").unwrap(),
+                status: RequirementStatus::RequiresCandidate {
+                    name: "avlib".to_string(),
+                },
+            },
+            breaks_installed("recorder", "libavcodec.so=62-64", "avlib"),
+        ];
+        let d = evaluate(
+            &[candidate("app"), candidate("recorder"), candidate("avlib")],
+            &pubs(&[
+                ("app", published_days_ago(10)),
+                ("recorder", published_days_ago(1)),
+                ("avlib", published_days_ago(10)),
+            ]),
+            &reqs,
+            &config(),
+            NOW,
+        );
+        assert_eq!(verdict_of(&d, "avlib"), Verdict::Block);
+        assert_eq!(verdict_of(&d, "app"), Verdict::Block);
+        assert_eq!(verdict_of(&d, "recorder"), Verdict::Block);
+    }
+
+    #[test]
+    fn dropped_capability_blocks_promoted_provider_without_repromotion() {
+        // Same as above, but the provider is too young and first gets
+        // promoted by its requirer: the BreaksInstalled block must stick.
+        let reqs = vec![
+            Requirement {
+                dependent: "app".to_string(),
+                dep: DepSpec::parse("libavcodec.so=63-64").unwrap(),
+                status: RequirementStatus::RequiresCandidate {
+                    name: "avlib".to_string(),
+                },
+            },
+            breaks_installed("recorder", "libavcodec.so=62-64", "avlib"),
+        ];
+        let d = evaluate(
+            &[candidate("app"), candidate("recorder"), candidate("avlib")],
+            &pubs(&[
+                ("app", published_days_ago(10)),
+                ("recorder", published_days_ago(1)),
+                ("avlib", published_days_ago(1)),
+            ]),
+            &reqs,
+            &config(),
+            NOW,
+        );
+        assert_eq!(verdict_of(&d, "avlib"), Verdict::Block);
+        assert_eq!(verdict_of(&d, "app"), Verdict::Block);
+        assert_eq!(verdict_of(&d, "recorder"), Verdict::Block);
+    }
+
+    #[test]
+    fn dropped_capability_is_irrelevant_when_provider_held_back() {
+        // Provider already blocked by age: no extra constraint, the dependent
+        // keeps its own verdict.
+        let d = evaluate(
+            &[candidate("recorder"), candidate("avlib")],
+            &pubs(&[
+                ("recorder", published_days_ago(10)),
+                ("avlib", published_days_ago(1)),
+            ]),
+            &[breaks_installed("recorder", "libavcodec.so=62-64", "avlib")],
+            &config(),
+            NOW,
+        );
+        assert_eq!(verdict_of(&d, "recorder"), Verdict::Allow);
+        assert_eq!(verdict_of(&d, "avlib"), Verdict::Block);
+        assert_eq!(
+            d.iter()
+                .find(|x| x.candidate.name == "avlib")
+                .unwrap()
+                .reasons
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn strict_closure_blocks_provider_dropping_capability() {
+        let mut cfg = config();
+        cfg.dependency_policy = DependencyPolicy::StrictClosure;
+        let d = evaluate(
+            &[candidate("recorder"), candidate("avlib")],
+            &pubs(&[
+                ("recorder", published_days_ago(1)),
+                ("avlib", published_days_ago(10)),
+            ]),
+            &[breaks_installed("recorder", "libavcodec.so=62-64", "avlib")],
+            &cfg,
+            NOW,
+        );
+        assert_eq!(verdict_of(&d, "recorder"), Verdict::Block);
+        assert_eq!(verdict_of(&d, "avlib"), Verdict::Block);
+    }
+
+    #[test]
+    fn held_back_rebuilt_dependent_is_promoted_with_provider() {
+        // The wf-recorder/ffmpeg scenario: recorder's candidate was rebuilt
+        // for the new soname, so its candidate dep is a RequiresCandidate
+        // edge (inert while recorder is held back). The installed recorder
+        // still needs the old soname, which the reverse pass turns into a
+        // coupling edge. When another requirer promotes the provider, the
+        // held-back dependent must be promoted alongside — otherwise pacman
+        // refuses the transaction.
+        let reqs = vec![
+            Requirement {
+                dependent: "app".to_string(),
+                dep: DepSpec::parse("libavcodec.so=63-64").unwrap(),
+                status: RequirementStatus::RequiresCandidate {
+                    name: "avlib".to_string(),
+                },
+            },
+            Requirement {
+                dependent: "recorder".to_string(),
+                dep: DepSpec::parse("libavcodec.so=63-64").unwrap(),
+                status: RequirementStatus::RequiresCandidate {
+                    name: "avlib".to_string(),
+                },
+            },
+            Requirement {
+                dependent: "recorder".to_string(),
+                dep: DepSpec::parse("libavcodec.so=62-64").unwrap(),
+                status: RequirementStatus::CoupledWithCandidate {
+                    name: "avlib".to_string(),
+                },
+            },
+        ];
+        let d = evaluate(
+            &[candidate("app"), candidate("recorder"), candidate("avlib")],
+            &pubs(&[
+                ("app", published_days_ago(10)),
+                ("recorder", published_days_ago(1)),
+                ("avlib", published_days_ago(1)),
+            ]),
+            &reqs,
+            &config(),
+            NOW,
+        );
+        assert_eq!(verdict_of(&d, "app"), Verdict::Allow);
+        assert_eq!(verdict_of(&d, "avlib"), Verdict::Promote);
+        assert_eq!(verdict_of(&d, "recorder"), Verdict::Promote);
+    }
+
+    #[test]
+    fn held_back_unpromotable_dependent_still_blocks_provider_via_reverse_edge() {
+        // Same shape, but the dependent is always_block-listed: the provider
+        // must not move underneath its installed version.
+        let mut cfg = config();
+        cfg.always_block = vec!["recorder".to_string()];
+        let reqs = vec![
+            Requirement {
+                dependent: "app".to_string(),
+                dep: DepSpec::parse("libavcodec.so=63-64").unwrap(),
+                status: RequirementStatus::RequiresCandidate {
+                    name: "avlib".to_string(),
+                },
+            },
+            Requirement {
+                dependent: "recorder".to_string(),
+                dep: DepSpec::parse("libavcodec.so=62-64").unwrap(),
+                status: RequirementStatus::CoupledWithCandidate {
+                    name: "avlib".to_string(),
+                },
+            },
+        ];
+        let d = evaluate(
+            &[candidate("app"), candidate("recorder"), candidate("avlib")],
+            &pubs(&[
+                ("app", published_days_ago(10)),
+                ("recorder", published_days_ago(1)),
+                ("avlib", published_days_ago(10)),
+            ]),
+            &reqs,
+            &cfg,
+            NOW,
+        );
+        assert_eq!(verdict_of(&d, "recorder"), Verdict::Block);
+        assert_eq!(verdict_of(&d, "avlib"), Verdict::Block);
+        assert_eq!(verdict_of(&d, "app"), Verdict::Block);
     }
 }
