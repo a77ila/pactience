@@ -57,15 +57,18 @@ runs:
           exit 1
         fi
         cd "$pkg"
+        # Use $GITHUB_WORKSPACE, not ${{ github.workspace }}: the context
+        # expression resolves to the host path, which does not exist inside
+        # the container job (the workspace is mounted at /__w/... there).
         if [ "${{ inputs.kind }}" = source ]; then
           sed -e "s/^pkgver=.*/pkgver=${version}/" \
               -e "s/^sha256sums=.*/sha256sums=('${SHA256_SOURCE}')/" \
-              "${{ github.workspace }}/packaging/aur/PKGBUILD" > PKGBUILD
+              "$GITHUB_WORKSPACE/packaging/aur/PKGBUILD" > PKGBUILD
         else
           sed -e "s/^pkgver=.*/pkgver=${version}/" \
               -e "s/^sha256sums_x86_64=.*/sha256sums_x86_64=('${SHA256_X86_64}')/" \
               -e "s/^sha256sums_aarch64=.*/sha256sums_aarch64=('${SHA256_AARCH64}')/" \
-              "${{ github.workspace }}/packaging/aur-bin/PKGBUILD" > PKGBUILD
+              "$GITHUB_WORKSPACE/packaging/aur-bin/PKGBUILD" > PKGBUILD
         fi
         # makepkg refuses to run as root; regenerate .SRCINFO as a user.
         # makepkg requires writable BUILDDIR/PKGDEST/... even for

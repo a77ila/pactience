@@ -3,6 +3,18 @@
 All notable changes to this project are documented here. The format is based
 on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.2.3] - 2026-08-27
+
+### Fixed
+
+- AUR publish workflow: `${{ github.workspace }}` in the `aur-publish`
+  composite action resolved to the runner *host* path, which does not
+  exist inside the `archlinux:base-devel` container job (the checkout is
+  mounted at `/__w/...` there), so rendering the PKGBUILD failed with
+  `sed: can't read ...: No such file or directory` and the AUR packages
+  were never updated. The action now uses `$GITHUB_WORKSPACE`, which the
+  runner maps to the in-container path.
+
 ## [0.2.2] - 2026-08-08
 
 ### Added
@@ -141,6 +153,9 @@ on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `--apply`, table and JSON output, first-run configuration template, and
   AUR publication via the release workflow.
 
+[0.2.3]: https://github.com/a77ila/pactience/compare/v0.2.2...v0.2.3
+[0.2.2]: https://github.com/a77ila/pactience/compare/v0.2.1...v0.2.2
+[0.2.1]: https://github.com/a77ila/pactience/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/a77ila/pactience/compare/v0.1.3...v0.2.0
 [0.1.3]: https://github.com/a77ila/pactience/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/a77ila/pactience/compare/v0.1.1...v0.1.2
