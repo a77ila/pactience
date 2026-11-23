@@ -4,7 +4,7 @@
 //! stays reserved for the report itself (table or JSON). The report is never
 //! affected by the chosen verbosity.
 
-use std::cell::Cell;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::cli::Cli;
 
@@ -27,14 +27,15 @@ pub struct Logger {
     level: Level,
     /// Set while a progress-bar line is on the terminal; diagnostics erase
     /// it before printing so the bar can be redrawn cleanly afterwards.
-    progress_active: Cell<bool>,
+    /// `AtomicBool` because parallel resolution workers share the logger.
+    progress_active: AtomicBool,
 }
 
 impl Logger {
     pub fn new(level: Level) -> Self {
         Logger {
             level,
-            progress_active: Cell::new(false),
+            progress_active: AtomicBool::new(false),
         }
     }
 
@@ -84,13 +85,13 @@ impl Logger {
 
     /// Mark that a progress-bar line is currently on the terminal (or gone).
     pub(crate) fn set_progress_active(&self, active: bool) {
-        self.progress_active.set(active);
+        self.progress_active.store(active, Ordering::Relaxed);
     }
 
     /// Erase an in-progress progress-bar line so a diagnostic prints on a
     /// clean line; the bar redraws itself on the next tick.
     fn clear_progress_line(&self) {
-        if self.progress_active.get() {
+        if self.progress_active.load(Ordering::Relaxed) {
             eprint!("\r\x1b[2K");
         }
     }

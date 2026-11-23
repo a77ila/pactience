@@ -3,6 +3,33 @@
 All notable changes to this project are documented here. The format is based
 on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.2.4] - 2026-11-23
+
+### Fixed
+
+- Cold-cache runs — typically the first run after a longer time, when most
+  of the local publication cache has expired — could take over an hour when
+  archive.archlinux.org was slow or unreachable. Publication dates were
+  looked up strictly one package at a time, each carrying a 15-second
+  timeout, so 250 missed cache entries meant up to 250 sequential timeouts.
+  Misses now resolve on a pool of 8 worker threads (results stream back to
+  the main thread, which alone owns the cache and the progress bar), and
+  after 5 failed Arch Archive requests the run stops trying: one warning is
+  logged and the remaining packages fall back to their repo `%BUILDDATE%`
+  immediately instead of burning a timeout each. A run against an
+  unreachable archive now finishes in seconds rather than an hour.
+- Interrupting a run (Ctrl+C) discarded every publication lookup it had
+  already completed, because the cache was only written at the very end —
+  the cache never seemed to "build up" after a slow run. The cache is now
+  re-saved every 20 lookups during the resolution pass, so an interrupted
+  run keeps the dates already resolved.
+
+### Removed
+
+- The scheduled `aur-sync` workflow (every-6-hour re-check that the AUR
+  packages match the latest GitHub Release): releases again publish to the
+  AUR solely via the `release.yml` workflow.
+
 ## [0.2.3] - 2026-08-27
 
 ### Fixed
@@ -153,6 +180,7 @@ on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `--apply`, table and JSON output, first-run configuration template, and
   AUR publication via the release workflow.
 
+[0.2.4]: https://github.com/a77ila/pactience/compare/v0.2.3...v0.2.4
 [0.2.3]: https://github.com/a77ila/pactience/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/a77ila/pactience/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/a77ila/pactience/compare/v0.2.0...v0.2.1

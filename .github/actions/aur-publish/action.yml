@@ -43,8 +43,8 @@ runs:
         version="${version#v}"
         pkg="${{ inputs.package }}"
         # The AUR goes down for maintenance occasionally; retry the clone
-        # instead of failing immediately. Multi-day outages are covered by
-        # the scheduled aur-sync workflow, not by this loop.
+        # instead of failing immediately. A multi-day outage still fails
+        # here; re-run this workflow once the AUR is back.
         # Cloning a not-yet-existing package yields an empty repository;
         # the AUR creates it on first push.
         for i in 1 2 3 4 5; do

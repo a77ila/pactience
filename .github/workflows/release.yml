@@ -92,7 +92,11 @@ jobs:
     container: archlinux:base-devel
     steps:
       - name: Install tooling
-        run: pacman -Sy --noconfirm --needed nodejs git openssh
+        # -Syu, not -Sy: refreshing the DBs without upgrading turns the
+        # install into a partial upgrade — new openssl sonames in the fresh
+        # repos vs. the container's installed pacman/curl/sudo, which pacman
+        # then refuses to break.
+        run: pacman -Syu --noconfirm --needed nodejs git openssh
 
       - uses: actions/checkout@v7
 
@@ -128,7 +132,11 @@ jobs:
     container: archlinux:base-devel
     steps:
       - name: Install tooling
-        run: pacman -Sy --noconfirm --needed nodejs git openssh
+        # -Syu, not -Sy: refreshing the DBs without upgrading turns the
+        # install into a partial upgrade — new openssl sonames in the fresh
+        # repos vs. the container's installed pacman/curl/sudo, which pacman
+        # then refuses to break.
+        run: pacman -Syu --noconfirm --needed nodejs git openssh
 
       - uses: actions/checkout@v7
 

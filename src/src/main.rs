@@ -22,6 +22,7 @@ mod vercmp;
 use std::collections::HashMap;
 use std::path::Path;
 use std::process::ExitCode;
+use std::sync::atomic::AtomicUsize;
 
 use clap::Parser;
 
@@ -35,6 +36,13 @@ use crate::model::{Decision, PackageSource, Publication, UpgradeCandidate, Verdi
 
 const PACMAN_SYNC_DIR: &str = "/var/lib/pacman/sync";
 const PACMAN_LOCAL_DIR: &str = "/var/lib/pacman/local";
+/// Publication lookups are independent of each other, so the main candidate
+/// pass resolves them on this many worker threads.
+const RESOLVE_WORKERS: usize = 8;
+/// The cache is persisted after every N parallel lookups: publication dates
+/// are the expensive part of a run, and an interrupted run should keep the
+/// ones already resolved.
+const CACHE_SAVE_INTERVAL: usize = 20;
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
@@ -269,6 +277,7 @@ fn run(cli: &Cli, log: &Logger) -> Result<ExitCode> {
     if let Some(warning) = cache_warning {
         log.warn(warning);
     }
+    let archive_failures = AtomicUsize::new(0);
     let sources = publication::Sources {
         archive: publication::archive::ArchivePublicationSource::new(&http),
         aur: publication::aur::AurPublicationSource {
@@ -287,6 +296,7 @@ fn run(cli: &Cli, log: &Logger) -> Result<ExitCode> {
             None
         },
         syncdb: &syncdb,
+        archive_failures: &archive_failures,
     };
     // Tell the user up front how much work the resolution pass involves:
     // cache hits are instant, misses may mean network lookups.
@@ -315,11 +325,69 @@ fn run(cli: &Cli, log: &Logger) -> Result<ExitCode> {
     ));
     let mut publications: HashMap<String, Publication> = HashMap::new();
     let mut progress = progress::Progress::start(candidates.len(), log);
+    let cache_key = |candidate: &UpgradeCandidate| {
+        cache::PublicationCache::key(
+            candidate.source,
+            &candidate.name,
+            &candidate.candidate_version,
+            aur_mode,
+        )
+    };
+    // Cache hits resolve instantly on the main thread.
     for candidate in &candidates {
-        let p = publication::resolve(candidate, &sources, &mut cache, now, log);
-        publications.insert(candidate.name.clone(), p);
+        let key = cache_key(candidate);
+        let Some(cached) = cache.get(&key, now) else {
+            continue;
+        };
+        log.debug(format!("{}: cache hit ({key})", candidate.name));
+        publication::report(candidate, &cached, log);
+        publications.insert(candidate.name.clone(), cached);
         progress.advance(log, &candidate.name);
     }
+    // Misses are independent of each other, so resolve them in parallel:
+    // worker threads only read shared state and stream (name, key,
+    // publication) triples back over a channel, while the main thread owns
+    // cache mutation, the progress bar, and periodic cache saves — an
+    // interrupted run keeps the publication dates already resolved.
+    let misses: Vec<&UpgradeCandidate> = candidates
+        .iter()
+        .filter(|c| !publications.contains_key(&c.name))
+        .collect();
+    let sources_ref = &sources;
+    let mut looked_up = 0usize;
+    std::thread::scope(|scope| {
+        let (tx, rx) = std::sync::mpsc::channel::<(String, String, Publication)>();
+        if !misses.is_empty() {
+            let chunk_size = misses.len().div_ceil(RESOLVE_WORKERS.min(misses.len()));
+            for group in misses.chunks(chunk_size) {
+                let tx = tx.clone();
+                scope.spawn(move || {
+                    for candidate in group {
+                        let publication = publication::lookup(candidate, sources_ref, log);
+                        if tx
+                            .send((candidate.name.clone(), cache_key(candidate), publication))
+                            .is_err()
+                        {
+                            // Receiver gone (run aborted): stop quietly.
+                            break;
+                        }
+                    }
+                });
+            }
+        }
+        drop(tx);
+        for (name, key, publication) in rx {
+            cache.insert(key, &publication, now);
+            publications.insert(name.clone(), publication);
+            progress.advance(log, &name);
+            looked_up += 1;
+            if looked_up.is_multiple_of(CACHE_SAVE_INTERVAL)
+                && let Err(e) = cache.save()
+            {
+                log.warn(format!("cannot write cache {}: {e}", cache_path.display()));
+            }
+        }
+    });
     progress.finish(log);
 
     // 6. Dependency requirement analysis. When `new_dependencies` allows it,
