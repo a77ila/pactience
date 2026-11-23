@@ -5,6 +5,7 @@ services:
       dockerfile: Dockerfile
     container_name: kimi-rust-cli
     working_dir: /workspace
+    network_mode: host
     volumes:
       - ..:/workspace
       - ../.docker:/workspace/.docker

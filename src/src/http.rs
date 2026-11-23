@@ -10,7 +10,9 @@ pub enum FetchOutcome {
     NotFound,
 }
 
-pub trait HttpClient {
+/// `Send + Sync` so the resolution pass can share one client across
+/// parallel lookup workers.
+pub trait HttpClient: Send + Sync {
     fn get(&self, url: &str) -> Result<FetchOutcome>;
 }
 

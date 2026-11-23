@@ -15,7 +15,9 @@ pub struct CommandOutput {
 
 /// Abstraction over process execution so discovery can be tested without a
 /// real pacman/AUR-helper installation.
-pub trait CommandRunner {
+/// `Send + Sync` so publication sources can be shared across the parallel
+/// resolution workers.
+pub trait CommandRunner: Send + Sync {
     fn run(&self, program: &str, args: &[&str]) -> Result<CommandOutput>;
 }
 

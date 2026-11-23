@@ -261,18 +261,18 @@ mod tests {
     use super::*;
     use crate::discovery::CommandOutput;
     use crate::model::PackageSource;
-    use std::cell::RefCell;
+    use std::sync::Mutex;
 
     /// Records every invocation; responds based on the joined command line.
     struct ScriptRunner {
-        invocations: RefCell<Vec<String>>,
+        invocations: Mutex<Vec<String>>,
         responses: Vec<(String, CommandOutput)>,
     }
 
     impl ScriptRunner {
         fn new() -> Self {
             ScriptRunner {
-                invocations: RefCell::new(Vec::new()),
+                invocations: Mutex::new(Vec::new()),
                 responses: Vec::new(),
             }
         }
@@ -291,7 +291,8 @@ mod tests {
 
         fn calls_matching(&self, needle: &str) -> usize {
             self.invocations
-                .borrow()
+                .lock()
+                .unwrap()
                 .iter()
                 .filter(|c| c.contains(needle))
                 .count()
@@ -304,7 +305,7 @@ mod tests {
                 .chain(args.iter().copied())
                 .collect::<Vec<_>>()
                 .join(" ");
-            self.invocations.borrow_mut().push(cmd.clone());
+            self.invocations.lock().unwrap().push(cmd.clone());
             for (needle, out) in &self.responses {
                 if cmd.contains(needle) {
                     return Ok(CommandOutput {

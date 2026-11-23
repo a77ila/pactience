@@ -33,7 +33,7 @@ impl<'a> ArchivePublicationSource<'a> {
     }
 
     #[cfg(test)]
-    fn with_base_url(http: &'a dyn HttpClient, base_url: &str) -> Self {
+    pub(crate) fn with_base_url(http: &'a dyn HttpClient, base_url: &str) -> Self {
         ArchivePublicationSource {
             http,
             base_url: base_url.to_string(),
